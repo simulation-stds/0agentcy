@@ -1,0 +1,49 @@
+# Runtime folders: keep placeholders, ignore user/generated contents.
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+temp/*
+!temp/.gitkeep
+tools/*
+!tools/.gitkeep
+
+# Local settings and secrets.
+app_settings.local.json
+*.local
+.env
+.env.*
+!.env.example
+
+# Logs.
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Old Python/cache artifacts.
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Large media scratch/export files.
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.gif
+*.apng
+*.wav
+*.mp3
+*.flac
+
+# OS/editor files.
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+.idea/
