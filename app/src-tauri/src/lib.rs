@@ -18,6 +18,7 @@ use tauri::Emitter;
 
 static CANCEL_UPSCALE: AtomicBool = AtomicBool::new(false);
 static CLOUDFLARE_TUNNEL: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+const FACEFUSION_ENV_NAME: &str = "videotools-facefusion";
 
 #[derive(Serialize)]
 struct ToolStatus {
@@ -25,6 +26,10 @@ struct ToolStatus {
     ffprobe: Option<String>,
     realesrgan: Option<String>,
     rife: Option<String>,
+    facefusion: Option<String>,
+    git: Option<String>,
+    conda: Option<String>,
+    cudnn: Option<String>,
     cloudflared: Option<String>,
     docker: Option<String>,
 }
@@ -55,6 +60,10 @@ struct PingvinSettings {
 struct AppSettings {
     #[serde(default)]
     default_download_folder: String,
+    #[serde(default)]
+    cuda_bin_folder: String,
+    #[serde(default)]
+    cudnn_bin_folder: String,
     segmind_api_key: String,
     segmind_target_fps: String,
     segmind_target_resolution: String,
@@ -70,6 +79,12 @@ impl Default for AppSettings {
                 .join("output")
                 .to_string_lossy()
                 .to_string(),
+            cuda_bin_folder: find_cuda_bin_dir()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            cudnn_bin_folder: find_cudnn_bin_dir()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
             segmind_api_key: String::new(),
             segmind_target_fps: "60".to_string(),
             segmind_target_resolution: "1080p".to_string(),
@@ -146,6 +161,20 @@ struct RifeModel {
     size_bytes: u64,
     size_label: String,
     estimated_size_label: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FaceFusionStatus {
+    state: String,
+    repo_path: String,
+    env_name: String,
+    current_size_label: String,
+    estimated_install_label: String,
+    available_providers: Vec<String>,
+    runtime_label: String,
+    provider_warning: String,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -265,6 +294,19 @@ struct SegmindTopazOptions {
     settings: AppSettings,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FaceFusionOptions {
+    input_path: String,
+    source_path: String,
+    output_folder: String,
+    output_name: String,
+    processor_preset: String,
+    execution_provider: String,
+    trim_start: f64,
+    trim_end: f64,
+}
+
 #[tauri::command]
 fn detect_tools() -> ToolStatus {
     ToolStatus {
@@ -272,6 +314,11 @@ fn detect_tools() -> ToolStatus {
         ffprobe: find_tool("ffprobe"),
         realesrgan: find_tool("realesrgan-ncnn-vulkan"),
         rife: find_tool("rife-ncnn-vulkan"),
+        facefusion: facefusion_repo_ready()
+            .then(|| facefusion_repo_dir().to_string_lossy().to_string()),
+        git: find_tool("git"),
+        conda: find_tool("conda"),
+        cudnn: find_cudnn_runtime(),
         cloudflared: find_tool("cloudflared"),
         docker: find_tool("docker"),
     }
@@ -534,6 +581,18 @@ fn get_tool_storage() -> Vec<ToolStorage> {
             "~250-450 MB installed",
         ),
         (
+            "git",
+            "Git",
+            root.join("git"),
+            "External install recommended",
+        ),
+        (
+            "miniforge",
+            "Miniforge",
+            root.join("miniforge"),
+            "~700 MB-2 GB depending on Python envs",
+        ),
+        (
             "realesrgan",
             "Real-ESRGAN",
             root.join("realesrgan-ncnn-vulkan"),
@@ -544,6 +603,12 @@ fn get_tool_storage() -> Vec<ToolStorage> {
             "RIFE",
             root.join("rife-ncnn-vulkan"),
             "~180-800 MB depending on models",
+        ),
+        (
+            "facefusion",
+            "FaceFusion",
+            root.join("facefusion"),
+            "~2-8 GB depending on runtime and models",
         ),
         (
             "cloudflared",
@@ -873,6 +938,122 @@ fn cancel_upscale_job() {
 }
 
 #[tauri::command]
+fn cancel_facefusion_job() {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn detect_facefusion() -> FaceFusionStatus {
+    facefusion_status()
+}
+
+#[tauri::command]
+async fn install_or_update_facefusion(
+    app: tauri::AppHandle,
+    onnxruntime: String,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        install_or_update_facefusion_blocking(app, onnxruntime)
+    })
+    .await
+    .map_err(|err| format!("FaceFusion install task failed: {err}"))?
+}
+
+fn install_or_update_facefusion_blocking(
+    app: tauri::AppHandle,
+    onnxruntime: String,
+) -> Result<JobResult, String> {
+    let git = find_tool("git")
+        .ok_or("Git was not found in PATH. Install Git before installing FaceFusion.")?;
+    let conda = find_tool("conda").ok_or(
+        "Conda was not found in PATH. Install Miniconda or Anaconda before installing FaceFusion.",
+    )?;
+    find_tool("ffmpeg").ok_or("FFmpeg was not found. Install FFmpeg first from Must haves.")?;
+
+    let tool_dir = facefusion_tool_dir();
+    let repo_dir = facefusion_repo_dir();
+    fs::create_dir_all(&tool_dir).map_err(|err| err.to_string())?;
+    let runtime = default_if_empty(&onnxruntime, "directml").to_lowercase();
+    let mut full_log = String::new();
+
+    if repo_dir.join("facefusion.py").exists() {
+        let mut pull = Command::new(&git);
+        pull.args(["-C"]).arg(&repo_dir).args(["pull", "--ff-only"]);
+        run_stage(
+            &app,
+            "FaceFusion update",
+            &mut pull,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    } else {
+        if repo_dir.exists() {
+            fs::remove_dir_all(&repo_dir).map_err(|err| err.to_string())?;
+        }
+        let mut clone = Command::new(&git);
+        clone
+            .args(["clone", "https://github.com/facefusion/facefusion"])
+            .arg(&repo_dir);
+        run_stage(
+            &app,
+            "FaceFusion clone",
+            &mut clone,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    }
+
+    if !conda_env_ready(&conda) {
+        let mut create = Command::new(&conda);
+        create.args([
+            "create",
+            "--yes",
+            "--name",
+            FACEFUSION_ENV_NAME,
+            "python=3.12",
+            "pip=25.0",
+        ]);
+        run_stage(
+            &app,
+            "FaceFusion environment",
+            &mut create,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    }
+
+    let mut install = Command::new(&conda);
+    install
+        .args([
+            "run",
+            "--no-capture-output",
+            "-n",
+            FACEFUSION_ENV_NAME,
+            "python",
+        ])
+        .arg("install.py")
+        .arg("--onnxruntime")
+        .arg(&runtime);
+    run_stage(
+        &app,
+        "FaceFusion install",
+        &mut install,
+        Some(repo_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    emit_progress(&app, "FaceFusion", "Installed FaceFusion.".to_string());
+    Ok(JobResult {
+        output_path: repo_dir.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
 async fn update_rife(
     app: tauri::AppHandle,
     selected_models: Option<Vec<String>>,
@@ -1002,6 +1183,108 @@ fn update_ffmpeg_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
                 let _ = fs::rename(&backup_dir, &managed_dir);
             }
             Err(format!("Failed to activate FFmpeg: {error}"))
+        }
+    }
+}
+
+#[tauri::command]
+async fn update_miniforge(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || update_miniforge_blocking(app))
+        .await
+        .map_err(|err| format!("Miniforge update task failed: {err}"))?
+}
+
+fn update_miniforge_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    let root = workspace_root();
+    let tools_dir = root.join("tools");
+    let temp_dir = root.join("temp").join("tool_downloads");
+    fs::create_dir_all(&tools_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+
+    emit_progress(
+        &app,
+        "Update Miniforge",
+        "Checking conda-forge/miniforge releases...".to_string(),
+    );
+    let asset = latest_github_asset_ext(
+        "conda-forge/miniforge",
+        &["miniforge3", "windows", "x86_64"],
+        ".exe",
+    )?;
+    let installer_path = temp_dir.join(&asset.name);
+    emit_progress(
+        &app,
+        "Update Miniforge",
+        format!("Downloading {}...", asset.name),
+    );
+    download_with_progress(&app, "Update Miniforge", &asset.url, &installer_path)?;
+
+    let staged_dir = root
+        .join("temp")
+        .join(format!("tool_stage_miniforge_{}", timestamp_id()));
+    if staged_dir.exists() {
+        fs::remove_dir_all(&staged_dir).map_err(|err| err.to_string())?;
+    }
+    fs::create_dir_all(&staged_dir).map_err(|err| err.to_string())?;
+
+    let mut install = Command::new(&installer_path);
+    install
+        .args([
+            "/S",
+            "/InstallationType=JustMe",
+            "/AddToPath=0",
+            "/RegisterPython=0",
+        ])
+        .arg(format!("/D={}", staged_dir.to_string_lossy()));
+    let mut full_log = String::new();
+    run_stage(
+        &app,
+        "Update Miniforge",
+        &mut install,
+        None,
+        None,
+        &mut full_log,
+    )?;
+
+    let staged_conda = find_conda_in_dir(&staged_dir)
+        .ok_or("Miniforge installer finished, but conda.exe was not found.")?;
+    let probe = Command::new(&staged_conda)
+        .arg("--version")
+        .output()
+        .map_err(|err| format!("Failed to validate Miniforge conda: {err}"))?;
+    if !probe.status.success() {
+        return Err(format!(
+            "Downloaded Miniforge failed validation: {}",
+            String::from_utf8_lossy(&probe.stderr).trim()
+        ));
+    }
+
+    let managed_dir = miniforge_dir();
+    let backup_dir = root
+        .join("temp")
+        .join(format!("tool_backup_miniforge_{}", timestamp_id()));
+    if managed_dir.exists() {
+        fs::rename(&managed_dir, &backup_dir).map_err(|err| err.to_string())?;
+    }
+    match fs::rename(&staged_dir, &managed_dir) {
+        Ok(()) => {
+            if backup_dir.exists() {
+                fs::remove_dir_all(&backup_dir).ok();
+            }
+            emit_progress(&app, "Update Miniforge", "Installed Miniforge.".to_string());
+            Ok(JobResult {
+                output_path: find_conda_in_dir(&managed_dir)
+                    .unwrap_or_else(|| managed_dir.join("Scripts").join("conda.exe"))
+                    .to_string_lossy()
+                    .to_string(),
+                log: format!("Installed {} from conda-forge/miniforge.", asset.name),
+            })
+        }
+        Err(error) => {
+            if backup_dir.exists() && !managed_dir.exists() {
+                let _ = fs::rename(&backup_dir, &managed_dir);
+            }
+            Err(format!("Failed to activate Miniforge: {error}"))
         }
     }
 }
@@ -1748,6 +2031,157 @@ fn run_rife_job_blocking(app: tauri::AppHandle, options: RifeOptions) -> Result<
         fs::remove_dir_all(&temp_dir).ok();
     }
     emit_progress(&app, "Done", format!("Output: {}", output_path.display()));
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn run_facefusion_job(
+    app: tauri::AppHandle,
+    options: FaceFusionOptions,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_facefusion_job_blocking(app, options))
+        .await
+        .map_err(|err| format!("FaceFusion task failed: {err}"))?
+}
+
+fn run_facefusion_job_blocking(
+    app: tauri::AppHandle,
+    options: FaceFusionOptions,
+) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
+    let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+    let conda = find_tool("conda").ok_or("Conda was not found in PATH.")?;
+    let settings = get_app_settings()?;
+    let repo_dir = facefusion_repo_dir();
+    if !repo_dir.join("facefusion.py").exists() {
+        return Err("FaceFusion is not installed. Install it from Video settings first.".into());
+    }
+    if !conda_env_ready(&conda) {
+        return Err(
+            "FaceFusion Conda environment is not ready. Run FaceFusion install/update first."
+                .into(),
+        );
+    }
+
+    let input_path = PathBuf::from(&options.input_path);
+    let source_path = PathBuf::from(&options.source_path);
+    if !input_path.exists() {
+        return Err("Target video does not exist.".into());
+    }
+    if !source_path.exists() {
+        return Err("Source face image does not exist.".into());
+    }
+
+    let output_folder = PathBuf::from(&options.output_folder);
+    fs::create_dir_all(&output_folder).map_err(|err| err.to_string())?;
+    let mut output_name = options.output_name.trim().to_string();
+    if Path::new(&output_name).extension().is_none() {
+        output_name.push_str(".mp4");
+    }
+    let output_path = output_folder.join(output_name);
+    if output_path.exists() {
+        fs::remove_file(&output_path).map_err(|err| err.to_string())?;
+    }
+
+    let temp_dir = workspace_root()
+        .join("temp")
+        .join("jobs")
+        .join("facefusion")
+        .join(timestamp_id());
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let target_path = if options.trim_end > options.trim_start + 0.05 {
+        let trimmed_target = temp_dir.join("target_trim.mp4");
+        let mut trim = Command::new(&ffmpeg);
+        trim.arg("-hide_banner").arg("-y");
+        add_trim_args(&mut trim, options.trim_start, options.trim_end);
+        trim.arg("-i")
+            .arg(&input_path)
+            .args(["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
+            .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k"])
+            .arg(&trimmed_target);
+        let mut full_log = String::new();
+        run_stage(
+            &app,
+            "FaceFusion trim",
+            &mut trim,
+            None,
+            None,
+            &mut full_log,
+        )?;
+        trimmed_target
+    } else {
+        input_path.clone()
+    };
+
+    let processors = facefusion_processors(&options.processor_preset);
+    let provider = facefusion_provider(&options.execution_provider);
+    let mut full_log = String::new();
+    emit_progress(
+        &app,
+        "FaceFusion",
+        format!("Running {} with {provider}.", options.processor_preset),
+    );
+
+    let mut runtime_paths = Vec::new();
+    if let Some(ffmpeg_dir) = PathBuf::from(&ffmpeg).parent() {
+        runtime_paths.push(ffmpeg_dir.to_path_buf());
+    }
+    if provider == "cuda" {
+        push_existing_runtime_path(&mut runtime_paths, &settings.cuda_bin_folder);
+        push_existing_runtime_path(&mut runtime_paths, &settings.cudnn_bin_folder);
+    }
+    let launcher_path = if provider == "cuda" {
+        write_facefusion_launcher(&temp_dir, &repo_dir, &runtime_paths)?
+    } else {
+        repo_dir.join("facefusion.py")
+    };
+
+    let mut command = Command::new(&conda);
+    command
+        .args([
+            "run",
+            "--no-capture-output",
+            "-n",
+            FACEFUSION_ENV_NAME,
+            "python",
+        ])
+        .arg(&launcher_path)
+        .arg("headless-run")
+        .arg("--source-paths")
+        .arg(&source_path)
+        .arg("--target-path")
+        .arg(&target_path)
+        .arg("--output-path")
+        .arg(&output_path)
+        .arg("--execution-providers")
+        .arg(provider);
+    if !processors.is_empty() {
+        command.arg("--processors");
+        for processor in processors {
+            command.arg(processor);
+        }
+    }
+    prepend_paths_env(&mut command, &runtime_paths);
+    run_stage(
+        &app,
+        "FaceFusion",
+        &mut command,
+        Some(repo_dir),
+        None,
+        &mut full_log,
+    )?;
+
+    if output_path.exists() {
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+    emit_progress(
+        &app,
+        "FaceFusion",
+        format!("Output: {}", output_path.display()),
+    );
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
         log: full_log,
@@ -2842,6 +3276,16 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
             .to_string_lossy()
             .to_string();
     }
+    if settings.cuda_bin_folder.trim().is_empty() {
+        settings.cuda_bin_folder = find_cuda_bin_dir()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+    }
+    if settings.cudnn_bin_folder.trim().is_empty() {
+        settings.cudnn_bin_folder = find_cudnn_bin_dir()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+    }
     if settings.segmind_input_mode == "pingvin" {
         settings.segmind_input_mode = "local_bridge".to_string();
     }
@@ -2910,6 +3354,239 @@ fn pingvin_compose() -> &'static str {
 "#
 }
 
+fn facefusion_tool_dir() -> PathBuf {
+    workspace_root().join("tools").join("facefusion")
+}
+
+fn facefusion_repo_dir() -> PathBuf {
+    facefusion_tool_dir().join("repo")
+}
+
+fn miniforge_dir() -> PathBuf {
+    workspace_root().join("tools").join("miniforge")
+}
+
+fn find_conda_in_dir(dir: &Path) -> Option<PathBuf> {
+    [
+        dir.join("Scripts").join("conda.exe"),
+        dir.join("condabin").join("conda.exe"),
+        dir.join("condabin").join("conda.bat"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
+fn facefusion_repo_ready() -> bool {
+    facefusion_repo_dir().join("facefusion.py").exists()
+}
+
+fn facefusion_status() -> FaceFusionStatus {
+    let repo_path = facefusion_repo_dir();
+    let current_bytes = dir_size(&facefusion_tool_dir());
+    let estimated_install_label = "~2-8 GB depending on runtime and models".to_string();
+    let repo_ready = repo_path.join("facefusion.py").exists();
+    let conda = find_tool("conda");
+    let env_ready = conda.as_deref().map(conda_env_ready).unwrap_or(false);
+    let (available_providers, provider_warning) = if env_ready {
+        conda
+            .as_deref()
+            .map(facefusion_available_providers)
+            .unwrap_or_else(|| (Vec::new(), String::new()))
+    } else {
+        (Vec::new(), String::new())
+    };
+    let runtime_label = facefusion_runtime_label(&available_providers);
+    let (state, message) = if !repo_ready {
+        (
+            "missing".to_string(),
+            "FaceFusion repo is not installed.".to_string(),
+        )
+    } else if conda.is_none() {
+        (
+            "needs_setup".to_string(),
+            "FaceFusion repo exists, but Conda was not found in PATH.".to_string(),
+        )
+    } else if !env_ready {
+        (
+            "needs_setup".to_string(),
+            format!("FaceFusion repo exists, but Conda env {FACEFUSION_ENV_NAME} is not ready."),
+        )
+    } else {
+        (
+            "installed".to_string(),
+            "FaceFusion repo and Conda environment are ready.".to_string(),
+        )
+    };
+
+    FaceFusionStatus {
+        state,
+        repo_path: repo_path.to_string_lossy().to_string(),
+        env_name: FACEFUSION_ENV_NAME.to_string(),
+        current_size_label: format_bytes(current_bytes),
+        estimated_install_label,
+        available_providers,
+        runtime_label,
+        provider_warning,
+        message,
+    }
+}
+
+fn conda_env_ready(conda: &str) -> bool {
+    Command::new(conda)
+        .args(["run", "-n", FACEFUSION_ENV_NAME, "python", "--version"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn facefusion_available_providers(conda: &str) -> (Vec<String>, String) {
+    let output = Command::new(conda)
+        .args([
+            "run",
+            "-n",
+            FACEFUSION_ENV_NAME,
+            "python",
+            "-c",
+            "import json, onnxruntime as ort; print(json.dumps(ort.get_available_providers()))",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return (
+            Vec::new(),
+            "Failed to probe ONNX Runtime providers.".to_string(),
+        );
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let providers = stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Vec<String>>(line.trim()).ok())
+        .unwrap_or_default();
+    let warning = stderr
+        .lines()
+        .filter(|line| {
+            let lower = line.to_lowercase();
+            lower.contains("error")
+                || lower.contains("fail")
+                || lower.contains("missing")
+                || lower.contains("cuda")
+        })
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (providers, warning)
+}
+
+fn facefusion_runtime_label(providers: &[String]) -> String {
+    let labels: Vec<&str> = [
+        ("CUDAExecutionProvider", "CUDA"),
+        ("DmlExecutionProvider", "DirectML"),
+        ("OpenVINOExecutionProvider", "OpenVINO"),
+        ("CPUExecutionProvider", "CPU"),
+    ]
+    .into_iter()
+    .filter_map(|(provider, label)| {
+        providers
+            .iter()
+            .any(|item| item == provider)
+            .then_some(label)
+    })
+    .collect();
+    if labels.is_empty() {
+        "Unknown".to_string()
+    } else {
+        labels.join(" + ")
+    }
+}
+
+fn facefusion_processors(preset: &str) -> Vec<&'static str> {
+    match preset {
+        "face_enhance" => vec!["face_enhancer"],
+        "swap_enhance" => vec!["face_swapper", "face_enhancer"],
+        _ => vec!["face_swapper"],
+    }
+}
+
+fn facefusion_provider(provider: &str) -> &'static str {
+    match provider.to_lowercase().as_str() {
+        "cuda" => "cuda",
+        "openvino" => "openvino",
+        "cpu" | "default" => "cpu",
+        _ => "directml",
+    }
+}
+
+fn push_existing_runtime_path(paths: &mut Vec<PathBuf>, path: &str) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let candidate = PathBuf::from(trimmed);
+    if candidate.exists() {
+        paths.push(candidate);
+    }
+}
+
+fn write_facefusion_launcher(
+    temp_dir: &Path,
+    repo_dir: &Path,
+    runtime_paths: &[PathBuf],
+) -> Result<PathBuf, String> {
+    let launcher_path = temp_dir.join("run_facefusion_with_dll_dirs.py");
+    let facefusion_script = repo_dir.join("facefusion.py");
+    let paths_json = serde_json::to_string(
+        &runtime_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|err| err.to_string())?;
+    let script_json = serde_json::to_string(&facefusion_script.to_string_lossy())
+        .map_err(|err| err.to_string())?;
+    let launcher = format!(
+        r#"import os
+import runpy
+import sys
+
+repo_dir = os.path.dirname({script_json})
+for dll_dir in {paths_json}:
+    if dll_dir and os.path.isdir(dll_dir):
+        os.add_dll_directory(dll_dir)
+
+facefusion_script = {script_json}
+os.chdir(repo_dir)
+sys.path.insert(0, repo_dir)
+sys.argv = [facefusion_script] + sys.argv[1:]
+runpy.run_path(facefusion_script, run_name="__main__")
+"#
+    );
+    fs::write(&launcher_path, launcher)
+        .map_err(|err| format!("Failed to write FaceFusion CUDA launcher: {err}"))?;
+    Ok(launcher_path)
+}
+
+fn prepend_paths_env(command: &mut Command, paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let current = env::var("PATH").unwrap_or_default();
+    let prefix = paths
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(separator);
+    command.env(
+        "PATH",
+        if current.is_empty() {
+            prefix
+        } else {
+            format!("{prefix}{separator}{current}")
+        },
+    );
+}
+
 trait StringifyTools {
     fn stringify(self) -> ToolStatus;
 }
@@ -2926,6 +3603,59 @@ fn find_tool(name: &str) -> Option<String> {
         .chain(path_tool_candidates(name))
         .find(|path| path.exists())
         .map(|path| path.to_string_lossy().to_string())
+}
+
+fn find_cudnn_runtime() -> Option<String> {
+    find_tool("cudnn64_9.dll")
+        .or_else(|| find_cudnn_dll().map(|path| path.to_string_lossy().to_string()))
+}
+
+fn find_cuda_bin_dir() -> Option<PathBuf> {
+    let root = PathBuf::from(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA");
+    let mut candidates = Vec::new();
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let path = entry.path().join("bin");
+            if path.join("cublasLt64_12.dll").exists() {
+                candidates.push(path);
+            }
+        }
+    }
+    candidates.sort_by(|left, right| right.to_string_lossy().cmp(&left.to_string_lossy()));
+    candidates.into_iter().next()
+}
+
+fn find_cudnn_bin_dir() -> Option<PathBuf> {
+    find_cudnn_dll().and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+fn find_cudnn_dll() -> Option<PathBuf> {
+    let root = PathBuf::from(r"C:\Program Files\NVIDIA\CUDNN");
+    find_file_recursive_limited(&root, "cudnn64_9.dll", 6)
+}
+
+fn find_file_recursive_limited(root: &Path, file_name: &str, max_depth: usize) -> Option<PathBuf> {
+    if max_depth == 0 || !root.exists() {
+        return None;
+    }
+
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(file_name))
+        {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_file_recursive_limited(&path, file_name, max_depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn local_tool_candidates(name: &str) -> Vec<PathBuf> {
@@ -2946,6 +3676,20 @@ fn local_tool_candidates(name: &str) -> Vec<PathBuf> {
             .join("rife-ncnn-vulkan.exe")],
         "ffmpeg" => vec![root.join("tools").join("ffmpeg").join("ffmpeg.exe")],
         "ffprobe" => vec![root.join("tools").join("ffmpeg").join("ffprobe.exe")],
+        "conda" => vec![
+            root.join("tools")
+                .join("miniforge")
+                .join("Scripts")
+                .join("conda.exe"),
+            root.join("tools")
+                .join("miniforge")
+                .join("condabin")
+                .join("conda.exe"),
+            root.join("tools")
+                .join("miniforge")
+                .join("condabin")
+                .join("conda.bat"),
+        ],
         "cloudflared" => vec![root
             .join("tools")
             .join("cloudflared")
@@ -3060,6 +3804,8 @@ fn path_tool_candidates(name: &str) -> Vec<PathBuf> {
     let mut names = vec![name.to_string()];
     if cfg!(windows) && !name.ends_with(".exe") {
         names.push(format!("{name}.exe"));
+        names.push(format!("{name}.cmd"));
+        names.push(format!("{name}.bat"));
     }
 
     env::var_os("PATH")
@@ -3389,6 +4135,7 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             detect_tools,
+            detect_facefusion,
             get_tool_storage,
             probe_video,
             generate_thumbnails,
@@ -3405,10 +4152,14 @@ pub fn run() {
             run_social_export_job,
             run_upscale_job,
             run_rife_job,
+            run_facefusion_job,
             run_segmind_topaz_job,
             upload_to_pingvin_share,
             cancel_upscale_job,
+            cancel_facefusion_job,
+            install_or_update_facefusion,
             update_ffmpeg,
+            update_miniforge,
             update_cloudflared,
             start_cloudflare_tunnel,
             stop_cloudflare_tunnel,

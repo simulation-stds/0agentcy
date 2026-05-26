@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import logoGreen from "./assets/logo_green.svg";
 import "./App.css";
 
@@ -10,6 +11,10 @@ type ToolStatus = {
   ffprobe: string | null;
   realesrgan: string | null;
   rife: string | null;
+  facefusion: string | null;
+  git: string | null;
+  conda: string | null;
+  cudnn: string | null;
   cloudflared: string | null;
   docker: string | null;
 };
@@ -66,6 +71,18 @@ type ToolStorage = {
   currentBytes: number;
   currentLabel: string;
   estimatedInstallLabel: string;
+};
+
+type FaceFusionStatus = {
+  state: "missing" | "needs_setup" | "installed";
+  repoPath: string;
+  envName: string;
+  currentSizeLabel: string;
+  estimatedInstallLabel: string;
+  availableProviders: string[];
+  runtimeLabel: string;
+  providerWarning: string;
+  message: string;
 };
 
 type ProgressEvent = {
@@ -154,6 +171,8 @@ type PingvinSettings = {
 
 type AppSettings = {
   defaultDownloadFolder: string;
+  cudaBinFolder: string;
+  cudnnBinFolder: string;
   segmindApiKey: string;
   segmindTargetFps: string;
   segmindTargetResolution: string;
@@ -163,6 +182,11 @@ type AppSettings = {
 };
 
 const defaultPath = "D:/W2DS/PELAGOS/content/260520_weekContent/oh_my_god.mp4";
+const appVersion = "0.1.0";
+const gitDownloadUrl = "https://git-scm.com/download/win";
+const cudaDownloadUrl = "https://developer.nvidia.com/cuda-downloads";
+const cudnnDownloadUrl = "https://developer.nvidia.com/cudnn-downloads";
+const cudaBinPath = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA";
 const actions = [
   { id: "trim_mp4", label: "Trim / Export MP4" },
   { id: "extract_frame", label: "Extract Current Frame" },
@@ -170,10 +194,13 @@ const actions = [
   { id: "social_export", label: "Social Export" },
   { id: "realesrgan_upscale", label: "AI Upscale with Real-ESRGAN" },
   { id: "rife_interpolate", label: "Frame Interpolation with RIFE" },
+  { id: "facefusion", label: "Face Swap / Enhance" },
 ];
 
 const defaultAppSettings: AppSettings = {
   defaultDownloadFolder: "",
+  cudaBinFolder: "",
+  cudnnBinFolder: "",
   segmindApiKey: "",
   segmindTargetFps: "60",
   segmindTargetResolution: "1080p",
@@ -348,6 +375,11 @@ function baseName(path: string) {
   return file.replace(/\.[^.]+$/, "") || "output";
 }
 
+function fileName(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.split("/").pop() || path || "";
+}
+
 function outputExtension(action: string, audioFormat: string) {
   if (action === "extract_frame") return ".png";
   if (action === "video_audio") return audioFormat === "wav" ? ".wav" : ".mp3";
@@ -360,6 +392,7 @@ function outputSuffix(action: string, audioFormat: string) {
   if (action === "social_export") return "social";
   if (action === "segmind_topaz") return "segmind";
   if (action === "rife_interpolate") return "rife_2x";
+  if (action === "facefusion") return "facefusion";
   return "trimmed";
 }
 
@@ -387,6 +420,30 @@ function formatProgressEvent(event: ProgressEvent) {
 function imageSource(item: Thumbnail | ModelPreview) {
   return item.dataUrl || item.data_url || "";
 }
+
+function recommendedRuntimeForDevice(name: string) {
+  const lower = name.toLowerCase();
+  if (lower.includes("nvidia") || lower.includes("geforce") || lower.includes("rtx") || lower.includes("gtx") || lower.includes("quadro")) {
+    return "CUDA";
+  }
+  if (lower.includes("intel") || lower.includes("arc") || lower.includes("iris") || lower.includes("uhd")) {
+    return "OpenVINO";
+  }
+  if (lower.includes("amd") || lower.includes("radeon")) {
+    return "DirectML";
+  }
+  if (lower.includes("cpu")) {
+    return "CPU";
+  }
+  return "DirectML";
+}
+
+const faceFusionProviderOptions = [
+  { value: "directml", label: "DirectML", provider: "DmlExecutionProvider" },
+  { value: "cuda", label: "CUDA", provider: "CUDAExecutionProvider" },
+  { value: "openvino", label: "OpenVINO", provider: "OpenVINOExecutionProvider" },
+  { value: "cpu", label: "CPU", provider: "CPUExecutionProvider" },
+];
 
 function localAssetSrc(path: string) {
   const trimmed = path.trim();
@@ -887,6 +944,7 @@ function App() {
   const [tools, setTools] = useState<ToolStatus | null>(null);
   const [models, setModels] = useState<RealEsrganModel[]>([]);
   const [rifeModels, setRifeModels] = useState<RifeModel[]>([]);
+  const [faceFusionStatus, setFaceFusionStatus] = useState<FaceFusionStatus | null>(null);
   const [toolStorage, setToolStorage] = useState<ToolStorage[]>([]);
   const [devices, setDevices] = useState<RealEsrganDevice[]>([]);
   const [inputPath, setInputPath] = useState(defaultPath);
@@ -924,6 +982,10 @@ function App() {
   const [rifeTtaSpatial, setRifeTtaSpatial] = useState(false);
   const [rifeTtaTemporal, setRifeTtaTemporal] = useState(false);
   const [rifeUhd, setRifeUhd] = useState(false);
+  const [faceFusionSourcePath, setFaceFusionSourcePath] = useState("");
+  const [faceFusionProcessor, setFaceFusionProcessor] = useState("swap_enhance");
+  const [faceFusionProvider, setFaceFusionProvider] = useState("directml");
+  const [faceFusionRuntime, setFaceFusionRuntime] = useState("directml");
   const [outputFolder, setOutputFolder] = useState("");
   const [outputName, setOutputName] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -933,7 +995,9 @@ function App() {
   const [isCompareOpen, setIsCompareOpen] = useState(false);
   const [isUpdatingEsrgan, setIsUpdatingEsrgan] = useState(false);
   const [isUpdatingRife, setIsUpdatingRife] = useState(false);
+  const [isUpdatingFaceFusion, setIsUpdatingFaceFusion] = useState(false);
   const [isUpdatingFfmpeg, setIsUpdatingFfmpeg] = useState(false);
+  const [isUpdatingMiniforge, setIsUpdatingMiniforge] = useState(false);
   const [isUpdatingCloudflared, setIsUpdatingCloudflared] = useState(false);
   const [isInstallingPingvin, setIsInstallingPingvin] = useState(false);
   const [isStartingPingvin, setIsStartingPingvin] = useState(false);
@@ -941,7 +1005,8 @@ function App() {
   const [isStartingTunnel, setIsStartingTunnel] = useState(false);
   const [isTunnelRunning, setIsTunnelRunning] = useState(false);
   const [settingsTab, setSettingsTab] = useState("general");
-  const [expandedTool, setExpandedTool] = useState("ffmpeg");
+  const [mustHaveTab, setMustHaveTab] = useState<"tools" | "environments" | "gpu">("tools");
+  const [expandedTool, setExpandedTool] = useState("");
   const [isModelInstallOpen, setIsModelInstallOpen] = useState(false);
   const [modelInstallTool, setModelInstallTool] = useState<"realesrgan" | "rife">("realesrgan");
   const [selectedInstallModels, setSelectedInstallModels] = useState<string[]>([]);
@@ -981,6 +1046,12 @@ function App() {
       .catch((error) => appendLog(`Output folder setup failed: ${String(error)}`));
   }, []);
 
+  useEffect(() => {
+    if (isSettingsOpen) {
+      setExpandedTool("");
+    }
+  }, [isSettingsOpen, settingsTab]);
+
   async function refreshToolState() {
     try {
       setTools(await invoke<ToolStatus>("detect_tools"));
@@ -1002,6 +1073,12 @@ function App() {
       setSelectedRifeModel((current) => current || items.find((item) => item.name === "rife-v4.6")?.name || items[0]?.name || "");
     } catch (error) {
       appendLog(`RIFE model scan failed: ${String(error)}`);
+    }
+
+    try {
+      setFaceFusionStatus(await invoke<FaceFusionStatus>("detect_facefusion"));
+    } catch (error) {
+      appendLog(`FaceFusion scan failed: ${String(error)}`);
     }
 
     try {
@@ -1068,6 +1145,7 @@ function App() {
     if (imageObjectUrl) return imageObjectUrl;
     return localAssetSrc(imagePath);
   }, [imageObjectUrl, imagePath]);
+  const faceFusionSourceSrc = useMemo(() => localAssetSrc(faceFusionSourcePath), [faceFusionSourcePath]);
 
   const duration = metadata?.duration ?? 0;
   const selectedDuration = Math.max(0, trimEnd - trimStart);
@@ -1081,6 +1159,27 @@ function App() {
   const activeModel = models.find((item) => item.name === selectedModel);
   const roughUpscaleEta = selectedFrames ? `${Math.ceil(selectedFrames / 3)}s+` : "Load video first";
   const roughRifeEta = selectedFrames ? `${Math.ceil(selectedFrames * Number(rifeMultiplier || 2) / 12)}s+` : "Load video first";
+  const detectedDeviceRows = [
+    ...devices.map((item, index) => ({
+      index: index + 1,
+      name: `GPU ${item.id} - ${item.name}`,
+      runtime: recommendedRuntimeForDevice(item.name),
+    })),
+    { index: devices.length + 1, name: "CPU", runtime: "CPU" },
+  ];
+  const availableFaceFusionProviders = faceFusionStatus?.availableProviders?.length
+    ? faceFusionProviderOptions.filter((item) => faceFusionStatus.availableProviders.includes(item.provider))
+    : faceFusionProviderOptions;
+  const hasNvidiaGpu = devices.some((item) => recommendedRuntimeForDevice(item.name) === "CUDA");
+  const hasUsableCuda = Boolean(faceFusionStatus?.availableProviders?.includes("CUDAExecutionProvider"));
+  const hasCudaWarning = Boolean(faceFusionStatus?.providerWarning?.toLowerCase().includes("cuda"));
+  const cudaStatusClass = hasUsableCuda ? "installed" : hasNvidiaGpu || hasCudaWarning ? "update" : "missing";
+  const cudaStatusLabel = hasUsableCuda ? "Runtime ready" : hasNvidiaGpu || hasCudaWarning ? "Needs CUDA 12.x DLLs" : "External";
+  const hasCudnn = Boolean(tools?.cudnn);
+  const cudnnStatusClass = hasCudnn ? "installed" : hasNvidiaGpu || hasCudaWarning ? "update" : "missing";
+  const cudnnStatusLabel = hasCudnn ? "Installed" : hasNvidiaGpu || hasCudaWarning ? "Needs cuDNN 9" : "External";
+  const cudaFolderLabel = appSettings.cudaBinFolder || (hasUsableCuda ? cudaBinPath : "CUDA v12.x bin folder");
+  const cudnnFolderLabel = appSettings.cudnnBinFolder || tools?.cudnn || "cuDNN 9 bin folder";
   const selectedComparePreview = modelPreviews.find((item) => item.model === selectedCompareModel) || modelPreviews[0];
   const currentInputKey = inputPath.trim();
   const hasCurrentVideoComparison = Boolean(compareOriginal && compareInputPath === currentInputKey);
@@ -1088,7 +1187,7 @@ function App() {
   const trimStartPercent = visibleDuration ? Math.min(100, Math.max(0, ((trimStart - visibleStart) / visibleDuration) * 100)) : 0;
   const trimEndPercent = visibleDuration ? Math.min(100, Math.max(0, ((trimEnd - visibleStart) / visibleDuration) * 100)) : 100;
   const hoverPercent = visibleDuration && timelineHoverTime !== null ? Math.min(100, Math.max(0, ((timelineHoverTime - visibleStart) / visibleDuration) * 100)) : null;
-  const allServicesAvailable = Boolean(tools?.ffmpeg && tools?.ffprobe && tools?.realesrgan && tools?.rife);
+  const allServicesAvailable = Boolean(tools?.ffmpeg && tools?.ffprobe && tools?.git && tools?.conda && tools?.realesrgan && tools?.rife);
   const cloudStatusClass = !appSettings.pingvin.localUrl.trim()
     ? "service-card bad"
     : appSettings.pingvin.publicUrl.trim()
@@ -1106,6 +1205,13 @@ function App() {
   );
   const modelCountLabel = (installed: number, catalogTotal: number) =>
     installed > catalogTotal ? `${installed} installed` : `${installed}/${catalogTotal} models`;
+
+  useEffect(() => {
+    if (!availableFaceFusionProviders.length) return;
+    if (!availableFaceFusionProviders.some((item) => item.value === faceFusionProvider)) {
+      setFaceFusionProvider(availableFaceFusionProviders[0].value);
+    }
+  }, [availableFaceFusionProviders, faceFusionProvider]);
 
   useEffect(() => {
     if (!imageSrc || toolCategory !== "image" || imageAction !== "dither") {
@@ -1379,6 +1485,24 @@ function App() {
     }
   }
 
+  async function chooseFaceFusionSource() {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [
+        {
+          name: "Face source image",
+          extensions: ["png", "jpg", "jpeg", "webp"],
+        },
+      ],
+    });
+
+    if (typeof selected === "string") {
+      setFaceFusionSourcePath(selected);
+      appendLog(`FaceFusion source: ${selected}`);
+    }
+  }
+
   async function chooseOutputFolder() {
     const selected = await openDialog({
       multiple: false,
@@ -1400,6 +1524,19 @@ function App() {
       const nextSettings = { ...appSettings, defaultDownloadFolder: selected };
       setAppSettings(nextSettings);
       setOutputFolder(selected);
+      await saveSettings(nextSettings);
+    }
+  }
+
+  async function chooseRuntimeFolder(field: "cudaBinFolder" | "cudnnBinFolder") {
+    const selected = await openDialog({
+      multiple: false,
+      directory: true,
+    });
+
+    if (typeof selected === "string") {
+      const nextSettings = { ...appSettings, [field]: selected };
+      setAppSettings(nextSettings);
       await saveSettings(nextSettings);
     }
   }
@@ -1724,7 +1861,7 @@ function App() {
                   includeAudio: socialIncludeAudio,
                 },
               })
-          : action === "rife_interpolate"
+            : action === "rife_interpolate"
             ? await invoke<JobResult>("run_rife_job", {
                 options: {
                   inputPath: inputPath.trim(),
@@ -1744,6 +1881,19 @@ function App() {
                   trimEnd,
                 },
               })
+            : action === "facefusion"
+              ? await invoke<JobResult>("run_facefusion_job", {
+                  options: {
+                    inputPath: inputPath.trim(),
+                    sourcePath: faceFusionSourcePath.trim(),
+                    outputFolder,
+                    outputName,
+                    processorPreset: faceFusionProcessor,
+                    executionProvider: faceFusionProvider,
+                    trimStart,
+                    trimEnd,
+                  },
+                })
             : action === "segmind_topaz"
               ? await invoke<JobResult>("run_segmind_topaz_job", {
                   options: {
@@ -1779,6 +1929,11 @@ function App() {
   async function cancelUpscale() {
     await invoke("cancel_upscale_job");
     appendLog("Cancel requested.");
+  }
+
+  async function cancelFaceFusion() {
+    await invoke("cancel_facefusion_job");
+    appendLog("FaceFusion cancel requested.");
   }
 
   async function compareModels() {
@@ -1924,6 +2079,23 @@ function App() {
     }
   }
 
+  async function updateFaceFusion() {
+    setIsUpdatingFaceFusion(true);
+    appendLog(`Starting FaceFusion install/update (${faceFusionRuntime})...`);
+    try {
+      const result = await invoke<JobResult>("install_or_update_facefusion", { onnxruntime: faceFusionRuntime });
+      if (result.log.trim()) {
+        appendLog(result.log.trim().split(/\r?\n/).slice(-8).join("\n"));
+      }
+      appendLog(`FaceFusion ready: ${result.outputPath}`);
+      await refreshToolState();
+    } catch (error) {
+      appendLog(`FaceFusion update failed: ${String(error).trim()}`);
+    } finally {
+      setIsUpdatingFaceFusion(false);
+    }
+  }
+
   async function updateFfmpeg() {
     setIsUpdatingFfmpeg(true);
     appendLog("Starting FFmpeg update...");
@@ -1938,6 +2110,23 @@ function App() {
       appendLog(`FFmpeg update failed: ${String(error).trim()}`);
     } finally {
       setIsUpdatingFfmpeg(false);
+    }
+  }
+
+  async function updateMiniforge() {
+    setIsUpdatingMiniforge(true);
+    appendLog("Starting Miniforge install/update...");
+    try {
+      const result = await invoke<JobResult>("update_miniforge");
+      if (result.log.trim()) {
+        appendLog(result.log.trim().split(/\r?\n/).slice(-8).join("\n"));
+      }
+      appendLog(`Miniforge ready: ${result.outputPath}`);
+      await refreshToolState();
+    } catch (error) {
+      appendLog(`Miniforge update failed: ${String(error).trim()}`);
+    } finally {
+      setIsUpdatingMiniforge(false);
     }
   }
 
@@ -1986,6 +2175,11 @@ function App() {
 
   function toggleExpandedTool(tool: string) {
     setExpandedTool((current) => current === tool ? "" : tool);
+  }
+
+  function selectMustHaveTab(tab: "tools" | "environments" | "gpu") {
+    setMustHaveTab(tab);
+    setExpandedTool("");
   }
 
   async function updateCloudflared() {
@@ -2141,11 +2335,20 @@ function App() {
     setAppSettings((current) => ({ ...current, pingvin: { ...current.pingvin, ...patch } }));
   }
 
+  async function openExternalDownload(url: string) {
+    try {
+      await openUrl(url);
+    } catch (error) {
+      appendLog(`Could not open download URL: ${String(error).trim()}`);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-lockup">
-          <img src={logoGreen} alt="Simulation Studios" />
+          <img src={logoGreen} alt="Simulation Studio" />
+          <span className="brand-version">V {appVersion}</span>
         </div>
         <nav className="tool-switcher" aria-label="Tool type">
           <button className={toolCategory === "video" ? "active" : ""} type="button" onClick={() => setToolCategory("video")}>
@@ -2448,6 +2651,41 @@ function App() {
                 <p>Rough ETA: {roughRifeEta}</p>
               </div>
             )}
+            {action === "facefusion" && (
+              <div className="settings-grid">
+                <label>
+                  <FieldLabel help="FaceFusion uses this still image as the source identity for face swap, or as the reference face for enhance-only workflows.">Source face image</FieldLabel>
+                  <button className="path-button source-preview-button" onClick={chooseFaceFusionSource} title={faceFusionSourcePath || "Choose source face image"}>
+                    {faceFusionSourcePath ? (
+                      <img className="source-preview-thumb" src={faceFusionSourceSrc} alt="" />
+                    ) : (
+                      <span className="material-symbols-rounded" aria-hidden="true">face</span>
+                    )}
+                    <span>{faceFusionSourcePath ? fileName(faceFusionSourcePath) : "Choose source face image"}</span>
+                  </button>
+                </label>
+                <label>
+                  Processor preset
+                  <select value={faceFusionProcessor} onChange={(event) => setFaceFusionProcessor(event.currentTarget.value)}>
+                    <option value="face_swap">Face Swap</option>
+                    <option value="swap_enhance">Face Swap + Enhance</option>
+                    <option value="face_enhance">Face Enhance Only</option>
+                  </select>
+                </label>
+                <label>
+                  <FieldLabel help="Only providers detected inside the FaceFusion Conda environment are shown after install. CUDA only appears when ONNX Runtime can actually load the CUDA DLLs.">Execution provider</FieldLabel>
+                  <select value={faceFusionProvider} onChange={(event) => setFaceFusionProvider(event.currentTarget.value)}>
+                    {availableFaceFusionProviders.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p>{faceFusionStatus?.message || "FaceFusion status has not been scanned yet."}</p>
+                <p>Target: current video selection.</p>
+              </div>
+            )}
           </div>
 
           <div className="panel">
@@ -2462,7 +2700,7 @@ function App() {
               Name
               <input value={outputName} onChange={(event) => setOutputName(event.currentTarget.value)} />
             </label>
-            <button className="primary" disabled={isRunning || !metadata} onClick={runJob}>
+            <button className="primary" disabled={isRunning || !metadata || (action === "facefusion" && !faceFusionSourcePath.trim())} onClick={runJob}>
               {isRunning ? "Running..." : "Run Action"}
             </button>
             {action === "realesrgan_upscale" && (
@@ -2473,6 +2711,11 @@ function App() {
             {action === "rife_interpolate" && (
               <button disabled={!isRunning} onClick={cancelUpscale}>
                 Cancel Interpolation
+              </button>
+            )}
+            {action === "facefusion" && (
+              <button disabled={!isRunning} onClick={cancelFaceFusion}>
+                Cancel FaceFusion
               </button>
             )}
           </div>
@@ -3069,6 +3312,10 @@ function App() {
                   <span className="material-symbols-rounded" aria-hidden="true">movie</span>
                   Video
                 </button>
+                <button className={settingsTab === "cloud" ? "active" : ""} onClick={() => setSettingsTab("cloud")}>
+                  <span className="material-symbols-rounded" aria-hidden="true">cloud</span>
+                  Cloud
+                </button>
                 <button className={settingsTab === "image" ? "active" : ""} onClick={() => setSettingsTab("image")}>
                   <span className="material-symbols-rounded" aria-hidden="true">image</span>
                   Image
@@ -3076,6 +3323,10 @@ function App() {
                 <button className={settingsTab === "audio" ? "active" : ""} onClick={() => setSettingsTab("audio")}>
                   <span className="material-symbols-rounded" aria-hidden="true">music_note</span>
                   Audio
+                </button>
+                <button className="settings-check-button" onClick={refreshToolState}>
+                  <span className="material-symbols-rounded" aria-hidden="true">refresh</span>
+                  Check Updates
                 </button>
               </nav>
 
@@ -3098,18 +3349,49 @@ function App() {
                         Save General
                       </button>
                     </div>
+                    <div className="settings-subsection">
+                      <h3>Detected Devices</h3>
+                    </div>
+                    <div className="device-list">
+                      {detectedDeviceRows.map((device) => (
+                        <div className="device-row" key={`${device.index}-${device.name}`}>
+                          <span>{device.index}. {device.name}</span>
+                          <span className={`runtime-chip ${device.runtime.toLowerCase().replace(/[^a-z0-9]/g, "-")}`}>{device.runtime}</span>
+                        </div>
+                      ))}
+                    </div>
                   </>
                 )}
 
                 {settingsTab === "must" && (
                   <>
                     <h2>Must haves</h2>
-                    <section className={`tool-dropdown ${expandedTool === "ffmpeg" ? "open" : ""}`}>
-                      <button className="tool-dropdown-head no-models" onClick={() => toggleExpandedTool("ffmpeg")}>
-                        <span className="tool-title-line">
-                          <strong>FFmpeg</strong>
+                    <nav className="settings-inner-tabs" aria-label="Must haves sections">
+                      <button type="button" className={mustHaveTab === "tools" ? "active" : ""} onClick={() => selectMustHaveTab("tools")}>
+                        <span className="material-symbols-rounded" aria-hidden="true">deployed_code</span>
+                        Tools
+                      </button>
+                      <button type="button" className={mustHaveTab === "environments" ? "active" : ""} onClick={() => selectMustHaveTab("environments")}>
+                        <span className="material-symbols-rounded" aria-hidden="true">sync_alt</span>
+                        Environments
+                      </button>
+                      <button type="button" className={mustHaveTab === "gpu" ? "active" : ""} onClick={() => selectMustHaveTab("gpu")}>
+                        <span className="material-symbols-rounded" aria-hidden="true">developer_board</span>
+                        GPU Processing
+                      </button>
+                    </nav>
+                    {mustHaveTab === "tools" && (
+                      <>
+                        <div className="must-have-group">
+                          <h3>Tools</h3>
+                          <p>Core command-line utilities used directly by the app for media inspection, conversion, and export.</p>
+                        </div>
+                        <section className={`tool-dropdown ${expandedTool === "ffmpeg" ? "open" : ""}`}>
+                      <button type="button" className="tool-dropdown-head no-models" onClick={() => toggleExpandedTool("ffmpeg")}>
+                        <strong className="tool-dropdown-head-title">
+                          FFmpeg
                           <span className={`status-chip ${tools?.ffmpeg && tools?.ffprobe ? "installed" : "missing"}`}>{tools?.ffmpeg && tools?.ffprobe ? "Installed" : "Missing"}</span>
-                        </span>
+                        </strong>
                         <span>{tools?.ffmpeg && tools?.ffprobe ? `Tool folder: ${storageFor("ffmpeg")?.currentLabel || "0 B"}` : `Estimated: ${storageFor("ffmpeg")?.estimatedInstallLabel || "~250-450 MB"}`}</span>
                         <span className="material-symbols-rounded" aria-hidden="true">{expandedTool === "ffmpeg" ? "keyboard_arrow_up" : "keyboard_arrow_down"}</span>
                       </button>
@@ -3138,6 +3420,158 @@ function App() {
                         </div>
                       )}
                     </section>
+                      </>
+                    )}
+
+                    {mustHaveTab === "environments" && (
+                      <>
+                        <div className="must-have-group">
+                          <h3>Source & Environments</h3>
+                          <p>Support tools for installing source-based AI projects and keeping their Python dependencies isolated from the rest of your system.</p>
+                        </div>
+                        <section className={`tool-dropdown ${expandedTool === "git" ? "open" : ""}`}>
+                      <button type="button" className="tool-dropdown-head no-models" onClick={() => toggleExpandedTool("git")}>
+                        <strong className="tool-dropdown-head-title">
+                          Git
+                          <span className={`status-chip ${tools?.git ? "installed" : "missing"}`}>{tools?.git ? "Installed" : "Missing"}</span>
+                        </strong>
+                        <span>{tools?.git ? "Detected from system PATH" : "External install recommended"}</span>
+                        <span className="material-symbols-rounded" aria-hidden="true">{expandedTool === "git" ? "keyboard_arrow_up" : "keyboard_arrow_down"}</span>
+                      </button>
+                      {expandedTool === "git" && (
+                        <div className="tool-dropdown-body">
+                          <p>Git is needed to clone and update source-based tools like FaceFusion. For v1, install Git for Windows normally so its SSL, SSH, and helper tools work as expected.</p>
+                          <div className="tool-component-row">
+                            <div>
+                              <strong>Git for Windows</strong>
+                              <span>Required for FaceFusion install/update.</span>
+                            </div>
+                            <code>{tools?.git ? "Installed" : "External install recommended"}</code>
+                          </div>
+                          <div className="tool-dropdown-info">
+                            <code title={tools?.git || "Install Git for Windows and make git.exe available on PATH"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{tools?.git || "Missing from PATH"}</code>
+                            <code><span className="material-symbols-rounded" aria-hidden="true">storage</span>{tools?.git ? "External system install" : storageFor("git")?.estimatedInstallLabel || "External install recommended"}</code>
+                          </div>
+                          <div className="tool-dropdown-actions external-only">
+                            <button className="primary" onClick={() => openExternalDownload(gitDownloadUrl)}><span className="material-symbols-rounded" aria-hidden="true">public</span>Download</button>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className={`tool-dropdown ${expandedTool === "miniforge" ? "open" : ""}`}>
+                      <button type="button" className="tool-dropdown-head no-models" onClick={() => toggleExpandedTool("miniforge")}>
+                        <strong className="tool-dropdown-head-title">
+                          Miniforge / Conda
+                          <span className={`status-chip ${tools?.conda ? "installed" : "missing"}`}>{tools?.conda ? "Installed" : "Missing"}</span>
+                        </strong>
+                        <span>{tools?.conda ? `Tool folder: ${storageFor("miniforge")?.currentLabel || "Detected"}` : `Estimated: ${storageFor("miniforge")?.estimatedInstallLabel || "~700 MB-2 GB"}`}</span>
+                        <span className="material-symbols-rounded" aria-hidden="true">{expandedTool === "miniforge" ? "keyboard_arrow_up" : "keyboard_arrow_down"}</span>
+                      </button>
+                      {expandedTool === "miniforge" && (
+                        <div className="tool-dropdown-body">
+                          <p>Conda creates isolated Python environments for FaceFusion and future Python AI tools. The managed install lives in tools/miniforge and does not need to be added to PATH.</p>
+                          <div className="tool-component-row">
+                            <div>
+                              <strong>Miniforge Conda Runtime</strong>
+                              <span>Used by FaceFusion to create the {faceFusionStatus?.envName || "videotools-facefusion"} environment.</span>
+                            </div>
+                            <code>{tools?.conda ? `Installed: ${storageFor("miniforge")?.currentLabel || "Detected"}` : `Estimated: ${storageFor("miniforge")?.estimatedInstallLabel || "~700 MB-2 GB"}`}</code>
+                            <button className="icon-button" disabled={isUpdatingMiniforge} onClick={updateMiniforge} title={tools?.conda ? "Update Miniforge" : "Download Miniforge"}>
+                              <span className="material-symbols-rounded" aria-hidden="true">{tools?.conda ? "sync" : "download"}</span>
+                            </button>
+                          </div>
+                          <div className="tool-dropdown-info">
+                            <code title={tools?.conda || "D:/W2DS/Tools/videomaxxxing/tools/miniforge"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{tools?.conda || "D:/W2DS/Tools/videomaxxxing/tools/miniforge"}</code>
+                            <code><span className="material-symbols-rounded" aria-hidden="true">storage</span>{tools?.conda ? `Tool folder: ${storageFor("miniforge")?.currentLabel || "Detected"}` : `Estimated: ${storageFor("miniforge")?.estimatedInstallLabel || "~700 MB-2 GB"}`}</code>
+                          </div>
+                          <div className="tool-dropdown-actions">
+                            <button disabled={isUpdatingMiniforge} onClick={updateMiniforge}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update All</button>
+                            <button disabled><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall All</button>
+                            <button className="primary" disabled={isUpdatingMiniforge} onClick={updateMiniforge}><span className="material-symbols-rounded" aria-hidden="true">download</span>Download All</button>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                      </>
+                    )}
+
+                    {mustHaveTab === "gpu" && (
+                      <>
+                        <div className="must-have-group">
+                          <h3>GPU Processing</h3>
+                          <p>NVIDIA-only runtime libraries for FaceFusion CUDA acceleration. DirectML remains the simpler Windows fallback when these are not configured.</p>
+                        </div>
+                        <section className={`tool-dropdown ${expandedTool === "cuda" ? "open" : ""}`}>
+                      <button type="button" className="tool-dropdown-head no-models" onClick={() => toggleExpandedTool("cuda")}>
+                        <strong className="tool-dropdown-head-title">
+                          CUDA Runtime
+                          <span className={`status-chip ${cudaStatusClass}`}>{cudaStatusLabel}</span>
+                        </strong>
+                        <span>{hasUsableCuda ? "Available to ONNX Runtime" : "External NVIDIA install"}</span>
+                        <span className="material-symbols-rounded" aria-hidden="true">{expandedTool === "cuda" ? "keyboard_arrow_up" : "keyboard_arrow_down"}</span>
+                      </button>
+                      {expandedTool === "cuda" && (
+                        <div className="tool-dropdown-body">
+                          <p>CUDA 12.x supplies NVIDIA GPU runtime DLLs such as cublasLt64_12.dll. It must be visible on PATH for FaceFusion's CUDA provider.</p>
+                          <div className="tool-component-row">
+                            <div>
+                              <strong>NVIDIA CUDA Toolkit 12.x</strong>
+                              <span>{hasCudaWarning ? "CUDA provider was detected, but required CUDA 12.x DLLs are missing from the app environment." : "Required only when choosing CUDA instead of DirectML."}</span>
+                            </div>
+                            <code>{hasUsableCuda ? "CUDAExecutionProvider available" : "External install recommended"}</code>
+                          </div>
+                          <button className="path-button" type="button" onClick={() => chooseRuntimeFolder("cudaBinFolder")}>
+                            <span className="material-symbols-rounded" aria-hidden="true">folder</span>
+                            <span>{cudaFolderLabel}</span>
+                          </button>
+                          <div className="tool-dropdown-info">
+                            <code title={cudaFolderLabel}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{cudaFolderLabel}</code>
+                            <code><span className="material-symbols-rounded" aria-hidden="true">storage</span>External NVIDIA system install</code>
+                          </div>
+                          <div className="tool-dropdown-actions external-only">
+                            <button className="primary" onClick={() => openExternalDownload(cudaDownloadUrl)}><span className="material-symbols-rounded" aria-hidden="true">public</span>Download</button>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className={`tool-dropdown ${expandedTool === "cudnn" ? "open" : ""}`}>
+                      <button type="button" className="tool-dropdown-head no-models" onClick={() => toggleExpandedTool("cudnn")}>
+                        <strong className="tool-dropdown-head-title">
+                          cuDNN Runtime
+                          <span className={`status-chip ${cudnnStatusClass}`}>{cudnnStatusLabel}</span>
+                        </strong>
+                        <span>{hasCudnn ? "Detected for CUDA provider" : "External NVIDIA install"}</span>
+                        <span className="material-symbols-rounded" aria-hidden="true">{expandedTool === "cudnn" ? "keyboard_arrow_up" : "keyboard_arrow_down"}</span>
+                      </button>
+                      {expandedTool === "cudnn" && (
+                        <div className="tool-dropdown-body">
+                          <p>cuDNN 9 supplies neural-network kernels used by ONNX Runtime GPU. FaceFusion CUDA needs cudnn64_9.dll visible to the app process.</p>
+                          <div className="tool-component-row">
+                            <div>
+                              <strong>NVIDIA cuDNN 9 for CUDA 12.x</strong>
+                              <span>Install it alongside CUDA 12.x and add its bin folder to PATH.</span>
+                            </div>
+                            <code>{hasCudnn ? "cudnn64_9.dll detected" : "External install recommended"}</code>
+                          </div>
+                          <button className="path-button" type="button" onClick={() => chooseRuntimeFolder("cudnnBinFolder")}>
+                            <span className="material-symbols-rounded" aria-hidden="true">folder</span>
+                            <span>{cudnnFolderLabel}</span>
+                          </button>
+                          <div className="tool-dropdown-info">
+                            <code title={cudnnFolderLabel}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{cudnnFolderLabel}</code>
+                            <code><span className="material-symbols-rounded" aria-hidden="true">storage</span>External NVIDIA system install</code>
+                          </div>
+                          <div className="tool-dropdown-actions external-only">
+                            <button className="primary" onClick={() => openExternalDownload(cudnnDownloadUrl)}><span className="material-symbols-rounded" aria-hidden="true">public</span>Download</button>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                      </>
+                    )}
+
                   </>
                 )}
 
@@ -3227,6 +3661,67 @@ function App() {
                             <button disabled={isUpdatingRife} onClick={() => openModelInstall("rife")}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update All</button>
                             <button disabled={!rifeModels.length || isUpdatingRife} onClick={() => deleteAllModels("rife")}><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall All</button>
                             <button className="primary" disabled={isUpdatingRife} onClick={() => updateRife(installModelCatalog.rife.map((model) => model.name))}><span className="material-symbols-rounded" aria-hidden="true">download</span>Download All</button>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+
+                    <section className={`tool-dropdown ${expandedTool === "facefusion" ? "open" : ""}`}>
+                      <button className="tool-dropdown-head no-models" onClick={() => toggleExpandedTool("facefusion")}>
+                        <span className="tool-title-line">
+                          <strong>FaceFusion</strong>
+                          <span className={`status-chip ${faceFusionStatus?.state === "installed" ? "installed" : faceFusionStatus?.state === "needs_setup" ? "update" : "missing"}`}>
+                            {faceFusionStatus?.state === "installed" ? "Installed" : faceFusionStatus?.state === "needs_setup" ? "Needs setup" : "Missing"}
+                          </span>
+                          {faceFusionStatus?.state === "installed" && (
+                            <span className="status-chip local">{faceFusionStatus.runtimeLabel || "Runtime unknown"}</span>
+                          )}
+                        </span>
+                        <span>{faceFusionStatus?.state === "installed" ? `Tool folder: ${storageFor("facefusion")?.currentLabel || faceFusionStatus.currentSizeLabel}` : `Estimated: ${storageFor("facefusion")?.estimatedInstallLabel || "~2-8 GB"}`}</span>
+                        <span className="material-symbols-rounded" aria-hidden="true">{expandedTool === "facefusion" ? "keyboard_arrow_up" : "keyboard_arrow_down"}</span>
+                      </button>
+                      {expandedTool === "facefusion" && (
+                        <div className="tool-dropdown-body">
+                          <p>FaceFusion runs locally through its Python CLI. DirectML is the default Windows runtime because it works across AMD, NVIDIA, and Intel GPUs.</p>
+                          {faceFusionStatus?.availableProviders?.length ? (
+                            <div className="runtime-chip-row">
+                              {availableFaceFusionProviders.map((provider) => (
+                                <span key={provider.value} className={`runtime-chip ${provider.value}`}>{provider.label}</span>
+                              ))}
+                            </div>
+                          ) : null}
+                          {faceFusionStatus?.providerWarning && (
+                            <p className="settings-note">Provider warning: {faceFusionStatus.providerWarning}</p>
+                          )}
+                          <div className="tool-component-row">
+                            <div>
+                              <strong>FaceFusion CLI</strong>
+                              <span>{faceFusionStatus?.message || "Status unavailable."}</span>
+                            </div>
+                            <code>{faceFusionStatus?.state === "installed" ? `Installed: ${storageFor("facefusion")?.currentLabel || faceFusionStatus.currentSizeLabel}` : `Estimated: ${storageFor("facefusion")?.estimatedInstallLabel || "~2-8 GB"}`}</code>
+                            <button className="icon-button" disabled={isUpdatingFaceFusion} onClick={updateFaceFusion} title={faceFusionStatus?.state === "installed" ? "Update FaceFusion" : "Install FaceFusion"}>
+                              <span className="material-symbols-rounded" aria-hidden="true">{faceFusionStatus?.state === "installed" ? "sync" : "download"}</span>
+                            </button>
+                          </div>
+                          <div className="settings-grid compact-settings">
+                            <label>
+                              <FieldLabel help="DirectML is the best Windows default and works broadly with AMD, NVIDIA, and Intel GPUs. CUDA is NVIDIA-only and usually fastest when CUDA is set up. OpenVINO is best for Intel hardware. CPU / Default is slow but the least hardware-specific fallback.">ONNX Runtime</FieldLabel>
+                              <select value={faceFusionRuntime} onChange={(event) => setFaceFusionRuntime(event.currentTarget.value)}>
+                                <option value="directml">DirectML</option>
+                                <option value="cuda">CUDA</option>
+                                <option value="openvino">OpenVINO</option>
+                                <option value="default">CPU / Default</option>
+                              </select>
+                            </label>
+                          </div>
+                          <div className="tool-dropdown-info">
+                            <code title={faceFusionStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/facefusion/repo"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{faceFusionStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/facefusion/repo"}</code>
+                            <code><span className="material-symbols-rounded" aria-hidden="true">storage</span>{faceFusionStatus?.state === "installed" ? `Tool folder: ${storageFor("facefusion")?.currentLabel || faceFusionStatus.currentSizeLabel}` : `Estimated: ${storageFor("facefusion")?.estimatedInstallLabel || "~2-8 GB"}`}</code>
+                          </div>
+                          <div className="tool-dropdown-actions">
+                            <button disabled={isUpdatingFaceFusion} onClick={updateFaceFusion}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update All</button>
+                            <button disabled><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall All</button>
+                            <button className="primary" disabled={isUpdatingFaceFusion} onClick={updateFaceFusion}><span className="material-symbols-rounded" aria-hidden="true">download</span>Download All</button>
                           </div>
                         </div>
                       )}
@@ -3348,18 +3843,6 @@ function App() {
                   </>
                 )}
               </div>
-            </div>
-
-            <div className="modal-actions">
-              <div className="service-card info gpu-summary">
-                <span>GPU Devices</span>
-                <strong>{devices.length ? "Detected" : "Auto"}</strong>
-                <code>{devices.length ? devices.map((item) => `GPU ${item.id}`).join(", ") : "Auto / not detected"}</code>
-              </div>
-              <button onClick={refreshToolState}>
-                <span className="material-symbols-rounded" aria-hidden="true">refresh</span>
-                Check Updates
-              </button>
             </div>
           </section>
         </div>

@@ -117,6 +117,7 @@ code,
   justify-self: start;
   display: flex;
   align-items: center;
+  gap: 10px;
   min-width: 170px;
   min-height: 38px;
 }
@@ -125,6 +126,17 @@ code,
   width: 160px;
   height: auto;
   display: block;
+}
+
+.brand-version {
+  flex: 0 0 auto;
+  color: #cffa9a;
+  padding: 4px 8px;
+  border: 1px solid rgba(146, 212, 85, 0.42);
+  border-radius: 999px;
+  background: rgba(146, 212, 85, 0.08);
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .tool-switcher {
@@ -516,6 +528,19 @@ label {
   justify-content: flex-start;
   min-width: 0;
   text-align: left;
+}
+
+.source-preview-button {
+  min-height: 48px;
+}
+
+.source-preview-thumb {
+  width: 32px;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border: 1px solid rgba(146, 212, 85, 0.58);
+  border-radius: 6px;
+  background: #080b09;
 }
 
 .panel,
@@ -1102,14 +1127,16 @@ label {
 }
 
 .settings-tabs {
-  display: grid;
-  align-content: start;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   padding-right: 14px;
   border-right: 1px solid #344039;
   position: sticky;
   top: 0;
-  align-self: start;
+  align-self: stretch;
 }
 
 .settings-tabs button {
@@ -1124,6 +1151,12 @@ label {
   border-color: rgba(146, 212, 85, 0.7);
 }
 
+.settings-tabs .settings-check-button {
+  margin-top: auto;
+  border-color: #344039;
+  background: rgba(32, 38, 34, 0.72);
+}
+
 .settings-content {
   min-width: 0;
   display: grid;
@@ -1132,6 +1165,94 @@ label {
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 6px;
+}
+
+.settings-inner-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.settings-inner-tabs button {
+  width: auto;
+  min-height: 34px;
+  padding: 5px 0 8px;
+  color: #dcebd9;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  font-weight: 800;
+}
+
+.settings-inner-tabs button.active {
+  color: #ecffd8;
+  border-bottom-color: #92d455;
+}
+
+.settings-inner-tabs .material-symbols-rounded {
+  font-size: 1rem;
+}
+
+.device-list {
+  display: grid;
+  gap: 8px;
+}
+
+.device-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(32, 38, 34, 0.72);
+  border: 1px solid #344039;
+  border-radius: 7px;
+}
+
+.device-row > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  color: #dcebd9;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-chip {
+  min-width: 74px;
+  padding: 4px 8px;
+  color: #cffa9a;
+  text-align: center;
+  border: 1px solid rgba(146, 212, 85, 0.58);
+  border-radius: 999px;
+  background: rgba(146, 212, 85, 0.1);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.runtime-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.runtime-chip.cuda {
+  color: #8ff6d2;
+  border-color: rgba(47, 208, 160, 0.6);
+  background: rgba(47, 208, 160, 0.1);
+}
+
+.runtime-chip.openvino {
+  color: #f6d67a;
+  border-color: rgba(246, 214, 122, 0.58);
+  background: rgba(246, 214, 122, 0.1);
+}
+
+.runtime-chip.cpu {
+  color: #c8d2cb;
+  border-color: rgba(200, 210, 203, 0.42);
+  background: rgba(200, 210, 203, 0.08);
 }
 
 .model-list,
@@ -1178,6 +1299,15 @@ label {
 .tool-dropdown-head strong {
   color: #eef6e8;
   font-size: 1.1rem;
+}
+
+.tool-dropdown-head-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  overflow-wrap: anywhere;
 }
 
 .tool-dropdown-head span {
@@ -1359,6 +1489,19 @@ label {
   text-overflow: clip;
 }
 
+.external-action-row {
+  justify-self: end;
+  display: flex;
+  gap: 8px;
+}
+
+.tool-component-row .external-action-row {
+  overflow: visible;
+  white-space: nowrap;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}
+
 .tool-dropdown-info,
 .tool-dropdown-actions {
   display: flex;
@@ -1372,6 +1515,10 @@ label {
 .tool-dropdown-actions .primary {
   width: auto;
   flex: 0 0 auto;
+}
+
+.tool-dropdown-actions.external-only {
+  justify-content: flex-start;
 }
 
 .tool-dropdown-info {
@@ -1447,6 +1594,32 @@ label {
   margin: 0;
   color: #eef6e8;
   font-size: 0.95rem;
+}
+
+.must-have-group {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(170, 184, 173, 0.22);
+}
+
+.must-have-group:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.must-have-group h3 {
+  margin: 0;
+  color: #eef6e8;
+  font-size: 0.95rem;
+}
+
+.must-have-group p {
+  margin: 0;
+  color: #aab8ad;
+  line-height: 1.32;
 }
 
 .settings-action {

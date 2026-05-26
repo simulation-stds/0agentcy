@@ -3711,6 +3711,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
+name = "simulation-studio"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-mcp-bridge",
+ "tauri-plugin-opener",
+ "tempfile",
+ "ureq",
+ "zip",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4260,23 +4277,6 @@ dependencies = [
  "urlpattern",
  "uuid",
  "walkdir",
-]
-
-[[package]]
-name = "tauri-video-tools"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-mcp-bridge",
- "tauri-plugin-opener",
- "tempfile",
- "ureq",
- "zip",
 ]
 
 [[package]]
