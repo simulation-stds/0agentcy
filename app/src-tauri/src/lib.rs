@@ -1,23 +1,21 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
     collections::hash_map::DefaultHasher,
     env, fs,
     hash::{Hash, Hasher},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    net::{TcpListener, TcpStream},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    sync::{mpsc, Arc, Mutex, OnceLock},
+    process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::mpsc,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Emitter;
 
 static CANCEL_UPSCALE: AtomicBool = AtomicBool::new(false);
-static CLOUDFLARE_TUNNEL: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 const FACEFUSION_ENV_NAME: &str = "videotools-facefusion";
 
 #[derive(Serialize)]
@@ -30,29 +28,6 @@ struct ToolStatus {
     git: Option<String>,
     conda: Option<String>,
     cudnn: Option<String>,
-    cloudflared: Option<String>,
-    docker: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct PingvinSettings {
-    #[serde(default = "default_pingvin_local_url")]
-    local_url: String,
-    #[serde(default)]
-    public_url: String,
-    #[serde(default)]
-    cloudflared_path: String,
-    #[serde(default)]
-    base_url: String,
-    #[serde(default)]
-    token: String,
-    #[serde(default)]
-    expiration: String,
-    #[serde(default)]
-    password: String,
-    #[serde(default)]
-    visitor_limit: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -64,12 +39,6 @@ struct AppSettings {
     cuda_bin_folder: String,
     #[serde(default)]
     cudnn_bin_folder: String,
-    segmind_api_key: String,
-    segmind_target_fps: String,
-    segmind_target_resolution: String,
-    segmind_input_mode: String,
-    segmind_video_url: String,
-    pingvin: PingvinSettings,
 }
 
 impl Default for AppSettings {
@@ -85,21 +54,6 @@ impl Default for AppSettings {
             cudnn_bin_folder: find_cudnn_bin_dir()
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default(),
-            segmind_api_key: String::new(),
-            segmind_target_fps: "60".to_string(),
-            segmind_target_resolution: "1080p".to_string(),
-            segmind_input_mode: "local_bridge".to_string(),
-            segmind_video_url: String::new(),
-            pingvin: PingvinSettings {
-                local_url: default_pingvin_local_url(),
-                public_url: String::new(),
-                cloudflared_path: String::new(),
-                base_url: String::new(),
-                token: String::new(),
-                expiration: String::new(),
-                password: String::new(),
-                visitor_limit: String::new(),
-            },
         }
     }
 }
@@ -214,21 +168,6 @@ struct JobResult {
     log: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TunnelResult {
-    public_url: String,
-    log: String,
-}
-
-struct LocalFileBridge {
-    local_url: String,
-    route_path: String,
-    stop: Arc<AtomicBool>,
-    requests: Arc<AtomicU64>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpscaleOptions {
@@ -287,15 +226,6 @@ struct SocialExportOptions {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SegmindTopazOptions {
-    input_path: String,
-    output_folder: String,
-    output_name: String,
-    settings: AppSettings,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct FaceFusionOptions {
     input_path: String,
     source_path: String,
@@ -319,8 +249,6 @@ fn detect_tools() -> ToolStatus {
         git: find_tool("git"),
         conda: find_tool("conda"),
         cudnn: find_cudnn_runtime(),
-        cloudflared: find_tool("cloudflared"),
-        docker: find_tool("docker"),
     }
     .stringify()
 }
@@ -609,18 +537,6 @@ fn get_tool_storage() -> Vec<ToolStorage> {
             "FaceFusion",
             root.join("facefusion"),
             "~2-8 GB depending on runtime and models",
-        ),
-        (
-            "cloudflared",
-            "Cloudflared",
-            root.join("cloudflared"),
-            "~40-80 MB installed",
-        ),
-        (
-            "pingvin",
-            "Pingvin",
-            root.join("pingvin"),
-            "Docker image + data, often 500 MB+",
         ),
     ];
 
@@ -1290,303 +1206,6 @@ fn update_miniforge_blocking(app: tauri::AppHandle) -> Result<JobResult, String>
 }
 
 #[tauri::command]
-async fn update_cloudflared(app: tauri::AppHandle) -> Result<JobResult, String> {
-    tauri::async_runtime::spawn_blocking(move || update_cloudflared_blocking(app))
-        .await
-        .map_err(|err| format!("Cloudflared update task failed: {err}"))?
-}
-
-fn update_cloudflared_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
-    let root = workspace_root();
-    let tools_dir = root.join("tools");
-    let temp_dir = root.join("temp").join("tool_downloads");
-    fs::create_dir_all(&tools_dir).map_err(|err| err.to_string())?;
-    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
-
-    emit_progress(
-        &app,
-        "Update Cloudflared",
-        "Checking cloudflare/cloudflared releases...".to_string(),
-    );
-    let asset = latest_github_asset_ext(
-        "cloudflare/cloudflared",
-        &["cloudflared-windows-amd64"],
-        ".exe",
-    )?;
-    let download_path = temp_dir.join(&asset.name);
-    emit_progress(
-        &app,
-        "Update Cloudflared",
-        format!("Downloading {}...", asset.name),
-    );
-    download_with_progress(&app, "Update Cloudflared", &asset.url, &download_path)?;
-
-    let staged_dir = root
-        .join("temp")
-        .join(format!("tool_stage_cloudflared_{}", timestamp_id()));
-    if staged_dir.exists() {
-        fs::remove_dir_all(&staged_dir).map_err(|err| err.to_string())?;
-    }
-    fs::create_dir_all(&staged_dir).map_err(|err| err.to_string())?;
-    let staged_exe = staged_dir.join("cloudflared.exe");
-    fs::copy(&download_path, &staged_exe).map_err(|err| err.to_string())?;
-
-    let probe = Command::new(&staged_exe)
-        .arg("--version")
-        .output()
-        .map_err(|err| format!("Failed to validate cloudflared: {err}"))?;
-    if !probe.status.success() {
-        return Err("Downloaded cloudflared executable failed validation.".into());
-    }
-
-    let managed_dir = tools_dir.join("cloudflared");
-    let backup_dir = root
-        .join("temp")
-        .join(format!("tool_backup_cloudflared_{}", timestamp_id()));
-    if managed_dir.exists() {
-        fs::rename(&managed_dir, &backup_dir).map_err(|err| err.to_string())?;
-    }
-    match fs::rename(&staged_dir, &managed_dir) {
-        Ok(()) => {
-            if backup_dir.exists() {
-                fs::remove_dir_all(&backup_dir).ok();
-            }
-            emit_progress(
-                &app,
-                "Update Cloudflared",
-                "Installed cloudflared.".to_string(),
-            );
-            Ok(JobResult {
-                output_path: managed_dir
-                    .join("cloudflared.exe")
-                    .to_string_lossy()
-                    .to_string(),
-                log: format!("Installed {} from cloudflare/cloudflared.", asset.name),
-            })
-        }
-        Err(error) => {
-            if backup_dir.exists() && !managed_dir.exists() {
-                let _ = fs::rename(&backup_dir, &managed_dir);
-            }
-            Err(format!("Failed to activate cloudflared: {error}"))
-        }
-    }
-}
-
-#[tauri::command]
-async fn start_cloudflare_tunnel(
-    app: tauri::AppHandle,
-    local_url: String,
-    cloudflared_path: String,
-) -> Result<TunnelResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        start_cloudflare_tunnel_blocking(app, local_url, cloudflared_path)
-    })
-    .await
-    .map_err(|err| format!("Cloudflare tunnel task failed: {err}"))?
-}
-
-fn start_cloudflare_tunnel_blocking(
-    app: tauri::AppHandle,
-    local_url: String,
-    cloudflared_path: String,
-) -> Result<TunnelResult, String> {
-    stop_cloudflare_tunnel_blocking(&app)?;
-    let executable = if cloudflared_path.trim().is_empty() {
-        find_tool("cloudflared").ok_or(
-            "cloudflared was not found. Install it from Cloud settings or choose cloudflared.exe.",
-        )?
-    } else {
-        cloudflared_path.trim().to_string()
-    };
-    let local_url = default_if_empty(&local_url, "http://localhost:3000").to_string();
-
-    emit_progress(
-        &app,
-        "Cloudflare Tunnel",
-        format!("Starting tunnel for {local_url}"),
-    );
-    let mut child = Command::new(&executable)
-        .args(["tunnel", "--url"])
-        .arg(&local_url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("Failed to start cloudflared at {executable}: {err}"))?;
-
-    let (sender, receiver) = mpsc::channel::<String>();
-    if let Some(stdout) = child.stdout.take() {
-        stream_lines(stdout, sender.clone());
-    }
-    if let Some(stderr) = child.stderr.take() {
-        stream_lines(stderr, sender.clone());
-    }
-    drop(sender);
-
-    let started_at = SystemTime::now();
-    let mut full_log = String::new();
-    loop {
-        while let Ok(line) = receiver.try_recv() {
-            if !line.trim().is_empty() {
-                full_log.push_str(&line);
-                full_log.push('\n');
-                emit_progress(&app, "Cloudflare Tunnel", line.clone());
-                if let Some(public_url) = extract_trycloudflare_url(&line) {
-                    *cloudflare_tunnel_slot()
-                        .lock()
-                        .map_err(|_| "Cloudflare tunnel lock is poisoned.".to_string())? =
-                        Some(child);
-                    emit_progress(
-                        &app,
-                        "Cloudflare Tunnel",
-                        format!("Public URL: {public_url}"),
-                    );
-                    return Ok(TunnelResult {
-                        public_url,
-                        log: full_log,
-                    });
-                }
-            }
-        }
-
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|err| format!("cloudflared failed while running: {err}"))?
-        {
-            return Err(format!(
-                "cloudflared exited before a tunnel URL was detected: {status}. {full_log}"
-            ));
-        }
-
-        if started_at
-            .elapsed()
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            > Duration::from_secs(45)
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "Timed out waiting for a trycloudflare.com URL. {full_log}"
-            ));
-        }
-
-        thread::sleep(Duration::from_millis(120));
-    }
-}
-
-#[tauri::command]
-fn stop_cloudflare_tunnel(app: tauri::AppHandle) -> Result<(), String> {
-    stop_cloudflare_tunnel_blocking(&app)
-}
-
-fn stop_cloudflare_tunnel_blocking(app: &tauri::AppHandle) -> Result<(), String> {
-    let mut slot = cloudflare_tunnel_slot()
-        .lock()
-        .map_err(|_| "Cloudflare tunnel lock is poisoned.".to_string())?;
-    if let Some(mut child) = slot.take() {
-        let _ = child.kill();
-        let _ = child.wait();
-        emit_progress(app, "Cloudflare Tunnel", "Stopped".to_string());
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn install_pingvin(app: tauri::AppHandle) -> Result<JobResult, String> {
-    tauri::async_runtime::spawn_blocking(move || install_pingvin_blocking(app))
-        .await
-        .map_err(|err| format!("Pingvin install task failed: {err}"))?
-}
-
-fn install_pingvin_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
-    let docker =
-        find_tool("docker").ok_or("Docker was not found. Install Docker Desktop first.")?;
-    let pingvin_dir = pingvin_dir();
-    fs::create_dir_all(pingvin_dir.join("data")).map_err(|err| err.to_string())?;
-    fs::create_dir_all(pingvin_dir.join("images")).map_err(|err| err.to_string())?;
-    fs::write(pingvin_dir.join("docker-compose.yml"), pingvin_compose())
-        .map_err(|err| err.to_string())?;
-
-    let mut log = String::new();
-    let mut pull = Command::new(&docker);
-    pull.args(["compose", "pull"]).current_dir(&pingvin_dir);
-    run_stage(&app, "Install Pingvin", &mut pull, None, None, &mut log)?;
-
-    Ok(JobResult {
-        output_path: pingvin_dir.to_string_lossy().to_string(),
-        log,
-    })
-}
-
-#[tauri::command]
-async fn start_pingvin(app: tauri::AppHandle) -> Result<JobResult, String> {
-    tauri::async_runtime::spawn_blocking(move || start_pingvin_blocking(app))
-        .await
-        .map_err(|err| format!("Pingvin start task failed: {err}"))?
-}
-
-fn start_pingvin_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
-    let docker =
-        find_tool("docker").ok_or("Docker was not found. Install Docker Desktop first.")?;
-    ensure_pingvin_compose()?;
-    let mut log = String::new();
-    let mut command = Command::new(&docker);
-    command
-        .args(["compose", "up", "-d"])
-        .current_dir(pingvin_dir());
-    run_stage(&app, "Start Pingvin", &mut command, None, None, &mut log)?;
-    Ok(JobResult {
-        output_path: "http://localhost:3000".to_string(),
-        log,
-    })
-}
-
-#[tauri::command]
-async fn stop_pingvin(app: tauri::AppHandle) -> Result<JobResult, String> {
-    tauri::async_runtime::spawn_blocking(move || stop_pingvin_blocking(app))
-        .await
-        .map_err(|err| format!("Pingvin stop task failed: {err}"))?
-}
-
-fn stop_pingvin_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
-    let docker =
-        find_tool("docker").ok_or("Docker was not found. Install Docker Desktop first.")?;
-    ensure_pingvin_compose()?;
-    let mut log = String::new();
-    let mut command = Command::new(&docker);
-    command.args(["compose", "down"]).current_dir(pingvin_dir());
-    run_stage(&app, "Stop Pingvin", &mut command, None, None, &mut log)?;
-    Ok(JobResult {
-        output_path: pingvin_dir().to_string_lossy().to_string(),
-        log,
-    })
-}
-
-#[tauri::command]
-fn pingvin_status() -> Result<JobResult, String> {
-    let docker =
-        find_tool("docker").ok_or("Docker was not found. Install Docker Desktop first.")?;
-    ensure_pingvin_compose()?;
-    let output = Command::new(&docker)
-        .args(["compose", "ps"])
-        .current_dir(pingvin_dir())
-        .output()
-        .map_err(|err| format!("Failed to check Pingvin status: {err}"))?;
-    let log = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if !output.status.success() {
-        return Err(log);
-    }
-    Ok(JobResult {
-        output_path: "http://localhost:3000".to_string(),
-        log,
-    })
-}
-
-#[tauri::command]
 async fn compare_realesrgan_models(
     app: tauri::AppHandle,
     path: String,
@@ -2188,561 +1807,6 @@ fn run_facefusion_job_blocking(
     })
 }
 
-#[tauri::command]
-async fn upload_to_pingvin_share(
-    app: tauri::AppHandle,
-    input_path: String,
-    settings: PingvinSettings,
-) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        upload_to_pingvin_share_blocking(&app, &PathBuf::from(input_path), &settings)
-    })
-    .await
-    .map_err(|err| format!("Pingvin upload task failed: {err}"))?
-}
-
-#[tauri::command]
-async fn run_segmind_topaz_job(
-    app: tauri::AppHandle,
-    options: SegmindTopazOptions,
-) -> Result<JobResult, String> {
-    tauri::async_runtime::spawn_blocking(move || run_segmind_topaz_job_blocking(app, options))
-        .await
-        .map_err(|err| format!("Segmind task failed: {err}"))?
-}
-
-fn run_segmind_topaz_job_blocking(
-    app: tauri::AppHandle,
-    options: SegmindTopazOptions,
-) -> Result<JobResult, String> {
-    let api_key = options.settings.segmind_api_key.trim();
-    if api_key.is_empty() {
-        return Err("Segmind API key is missing.".into());
-    }
-
-    let input_path = PathBuf::from(&options.input_path);
-    let mut bridge_guard: Option<LocalFileBridge> = None;
-    let mut stop_tunnel_after_job = false;
-    let video_url = if matches!(
-        options.settings.segmind_input_mode.as_str(),
-        "local_bridge" | "pingvin"
-    ) {
-        let bridge = start_local_file_bridge(&app, &input_path)?;
-        let tunnel = start_cloudflare_tunnel_blocking(
-            app.clone(),
-            bridge.local_url.clone(),
-            options.settings.pingvin.cloudflared_path.clone(),
-        )?;
-        let public_url = format!(
-            "{}{}",
-            tunnel.public_url.trim_end_matches('/'),
-            bridge.route_path
-        );
-        emit_progress(
-            &app,
-            "Local Bridge",
-            format!("Public video URL ready: {public_url}"),
-        );
-        if let Err(error) = verify_public_bridge_url(&app, &public_url) {
-            let _ = stop_cloudflare_tunnel_blocking(&app);
-            stop_local_file_bridge(bridge);
-            return Err(error);
-        }
-        bridge_guard = Some(bridge);
-        stop_tunnel_after_job = true;
-        public_url
-    } else {
-        let url = options.settings.segmind_video_url.trim().to_string();
-        if url.is_empty() {
-            return Err("Segmind video URL is missing.".into());
-        }
-        url
-    };
-
-    let target_fps = options
-        .settings
-        .segmind_target_fps
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(60);
-    let target_resolution = default_if_empty(&options.settings.segmind_target_resolution, "1080p");
-    let body = json!({
-        "video": video_url,
-        "target_fps": target_fps,
-        "target_resolution": target_resolution,
-    });
-
-    let result = (|| {
-        emit_progress(&app, "Segmind Topaz", "Sending request...".to_string());
-        let mut response = ureq::post("https://api.segmind.com/v1/topaz-video-upscale")
-            .header("User-Agent", "videomaxxxing-local-tool")
-            .header("Content-Type", "application/json")
-            .header("x-api-key", api_key)
-            .send_json(body)
-            .map_err(|err| format!("Segmind request failed: {err}"))?;
-        let status = response.status().as_u16();
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|err| format!("Failed to read Segmind response: {err}"))?;
-        if !(200..300).contains(&status) {
-            return Err(format!("Segmind failed with HTTP {status}: {text}"));
-        }
-
-        let output_url = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| find_first_url(&value))
-            .unwrap_or_default();
-        let local_hint = if output_url.is_empty() {
-            PathBuf::from(&options.output_folder)
-                .join(default_if_empty(&options.output_name, "segmind_result.mp4"))
-                .to_string_lossy()
-                .to_string()
-        } else {
-            output_url
-        };
-        emit_progress(&app, "Segmind Topaz", "Response received.".to_string());
-        Ok(JobResult {
-            output_path: local_hint,
-            log: pretty_json_or_raw(&text),
-        })
-    })();
-
-    if let Some(bridge) = bridge_guard {
-        let request_count = bridge.requests.load(Ordering::SeqCst);
-        if request_count == 0 {
-            emit_progress(
-                &app,
-                "Local Bridge",
-                "No valid bridge requests were received during the Segmind call.".to_string(),
-            );
-        }
-        schedule_local_bridge_cleanup(app.clone(), bridge, stop_tunnel_after_job, 600);
-    } else if stop_tunnel_after_job {
-        let _ = stop_cloudflare_tunnel_blocking(&app);
-    }
-
-    result
-}
-
-fn verify_public_bridge_url(app: &tauri::AppHandle, public_url: &str) -> Result<(), String> {
-    emit_progress(
-        app,
-        "Local Bridge",
-        "Verifying public bridge URL...".to_string(),
-    );
-    let started_at = SystemTime::now();
-    let mut attempt = 0_u32;
-    let mut last_error: Option<String>;
-    loop {
-        attempt += 1;
-        match ureq::get(public_url)
-            .header("User-Agent", "videomaxxxing-local-tool")
-            .header("Range", "bytes=0-0")
-            .call()
-        {
-            Ok(mut response) => {
-                let status = response.status().as_u16();
-                if matches!(status, 200 | 206) {
-                    emit_progress(
-                        app,
-                        "Local Bridge",
-                        format!("Public bridge verified with HTTP {status}."),
-                    );
-                    return Ok(());
-                }
-                let text = response.body_mut().read_to_string().unwrap_or_default();
-                last_error = Some(format!("HTTP {status}: {text}"));
-                if !matches!(status, 502 | 503 | 530) {
-                    return Err(format!(
-                        "Public bridge check failed with {}",
-                        last_error.as_deref().unwrap_or("unknown error")
-                    ));
-                }
-            }
-            Err(error) => {
-                last_error = Some(error.to_string());
-            }
-        }
-
-        let elapsed = started_at
-            .elapsed()
-            .unwrap_or_else(|_| Duration::from_secs(0));
-        if elapsed > Duration::from_secs(90) {
-            return Err(format!(
-                "Public bridge check timed out after {attempt} attempts. Last error: {last_error}",
-                last_error = last_error.as_deref().unwrap_or("unknown error")
-            ));
-        }
-
-        if attempt == 1 || attempt % 5 == 0 {
-            emit_progress(
-                app,
-                "Local Bridge",
-                format!(
-                    "Waiting for Cloudflare quick tunnel DNS/routing ({attempt} attempts). Last error: {last_error}",
-                    last_error = last_error.as_deref().unwrap_or("unknown error")
-                ),
-            );
-        }
-        thread::sleep(Duration::from_secs(2));
-    }
-}
-
-fn schedule_local_bridge_cleanup(
-    app: tauri::AppHandle,
-    bridge: LocalFileBridge,
-    stop_tunnel: bool,
-    after_seconds: u64,
-) {
-    emit_progress(
-        &app,
-        "Local Bridge",
-        format!("Keeping bridge URL alive for {after_seconds}s for remote fetch/debug."),
-    );
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(after_seconds));
-        stop_local_file_bridge(bridge);
-        if stop_tunnel {
-            let _ = stop_cloudflare_tunnel_blocking(&app);
-        }
-    });
-}
-
-fn start_local_file_bridge(
-    app: &tauri::AppHandle,
-    input_path: &Path,
-) -> Result<LocalFileBridge, String> {
-    if !input_path.exists() {
-        return Err("Input video does not exist.".into());
-    }
-    let listener =
-        TcpListener::bind("127.0.0.1:0").map_err(|err| format!("Bridge bind failed: {err}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|err| format!("Bridge nonblocking setup failed: {err}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|err| format!("Bridge address lookup failed: {err}"))?
-        .port();
-    let local_url = format!("http://127.0.0.1:{port}");
-    let token = format!("{}{}", timestamp_id(), short_path_hash(input_path));
-    let extension = input_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("mp4");
-    let route_path = format!("/files/{token}/input.{extension}");
-    let file_path = input_path.to_path_buf();
-    let stop = Arc::new(AtomicBool::new(false));
-    let requests = Arc::new(AtomicU64::new(0));
-    let stop_thread = stop.clone();
-    let requests_thread = requests.clone();
-    let route_path_thread = route_path.clone();
-    let app_thread = app.clone();
-    let handle = thread::spawn(move || {
-        while !stop_thread.load(Ordering::SeqCst) {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let file_path = file_path.clone();
-                    let route_path = route_path_thread.clone();
-                    let requests = requests_thread.clone();
-                    let app = app_thread.clone();
-                    thread::spawn(move || {
-                        if let Err(error) =
-                            handle_bridge_client(stream, &file_path, &route_path, &requests, &app)
-                        {
-                            emit_progress(&app, "Local Bridge", error);
-                        }
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(80));
-                }
-                Err(error) => {
-                    emit_progress(
-                        &app_thread,
-                        "Local Bridge",
-                        format!("Bridge failed: {error}"),
-                    );
-                    break;
-                }
-            }
-        }
-    });
-
-    emit_progress(
-        app,
-        "Local Bridge",
-        format!("Serving selected video at {local_url}{route_path}"),
-    );
-    Ok(LocalFileBridge {
-        local_url,
-        route_path,
-        stop,
-        requests,
-        handle: Some(handle),
-    })
-}
-
-fn stop_local_file_bridge(mut bridge: LocalFileBridge) {
-    bridge.stop.store(true, Ordering::SeqCst);
-    if let Some(handle) = bridge.handle.take() {
-        let _ = handle.join();
-    }
-}
-
-fn handle_bridge_client(
-    mut stream: TcpStream,
-    input_path: &Path,
-    route_path: &str,
-    requests: &AtomicU64,
-    app: &tauri::AppHandle,
-) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(8)))
-        .map_err(|err| format!("Bridge timeout setup failed: {err}"))?;
-    let mut buffer = [0_u8; 8192];
-    let count = stream
-        .read(&mut buffer)
-        .map_err(|err| format!("Bridge request read failed: {err}"))?;
-    let request = String::from_utf8_lossy(&buffer[..count]);
-    let mut lines = request.lines();
-    let first_line = lines.next().unwrap_or_default();
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let path = parts.next().unwrap_or_default();
-    if !matches!(method, "GET" | "HEAD") {
-        return write_bridge_response(
-            &mut stream,
-            "405 Method Not Allowed",
-            &[("Allow", "GET, HEAD".to_string())],
-            None,
-            method,
-        );
-    }
-    if path != route_path {
-        return write_bridge_response(&mut stream, "404 Not Found", &[], None, method);
-    }
-    requests.fetch_add(1, Ordering::SeqCst);
-
-    let mut range_header: Option<String> = None;
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("range") {
-                range_header = Some(value.trim().to_string());
-                break;
-            }
-        }
-    }
-
-    let metadata = fs::metadata(input_path).map_err(|err| {
-        format!(
-            "Bridge metadata read failed for {}: {err}",
-            input_path.display()
-        )
-    })?;
-    let file_size = metadata.len();
-    if file_size == 0 {
-        return write_bridge_response(&mut stream, "416 Range Not Satisfiable", &[], None, method);
-    }
-    let content_type = content_type_for_path(input_path).to_string();
-    let (status, start, end) = match range_header
-        .as_deref()
-        .and_then(|value| parse_range(value, file_size))
-    {
-        Some((start, end)) => ("206 Partial Content", start, end),
-        None => ("200 OK", 0, file_size - 1),
-    };
-    let content_length = end - start + 1;
-    let mut headers = vec![
-        ("Content-Type", content_type),
-        ("Accept-Ranges", "bytes".to_string()),
-        ("Cache-Control", "no-store".to_string()),
-        ("Content-Length", content_length.to_string()),
-    ];
-    if status.starts_with("206") {
-        headers.push(("Content-Range", format!("bytes {start}-{end}/{file_size}")));
-    }
-    emit_progress(
-        app,
-        "Local Bridge",
-        format!("Segmind requested bytes {start}-{end} of {file_size}"),
-    );
-    write_bridge_response(
-        &mut stream,
-        status,
-        &headers,
-        Some((input_path, start, content_length)),
-        method,
-    )
-}
-
-fn write_bridge_response(
-    stream: &mut TcpStream,
-    status: &str,
-    headers: &[(&str, String)],
-    body: Option<(&Path, u64, u64)>,
-    method: &str,
-) -> Result<(), String> {
-    let mut response = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
-    for (name, value) in headers {
-        response.push_str(name);
-        response.push_str(": ");
-        response.push_str(value);
-        response.push_str("\r\n");
-    }
-    response.push_str("\r\n");
-    stream
-        .write_all(response.as_bytes())
-        .map_err(|err| format!("Bridge response write failed: {err}"))?;
-    if method == "HEAD" {
-        return Ok(());
-    }
-    if let Some((path, start, length)) = body {
-        let mut file = fs::File::open(path)
-            .map_err(|err| format!("Bridge file open failed for {}: {err}", path.display()))?;
-        file.seek(SeekFrom::Start(start))
-            .map_err(|err| format!("Bridge file seek failed: {err}"))?;
-        let mut limited = file.take(length);
-        std::io::copy(&mut limited, stream)
-            .map_err(|err| format!("Bridge file stream failed: {err}"))?;
-    }
-    Ok(())
-}
-
-fn parse_range(value: &str, file_size: u64) -> Option<(u64, u64)> {
-    let range = value.trim().strip_prefix("bytes=")?;
-    let (start_raw, end_raw) = range.split_once('-')?;
-    if start_raw.trim().is_empty() {
-        let suffix = end_raw.trim().parse::<u64>().ok()?;
-        if suffix == 0 {
-            return None;
-        }
-        let start = file_size.saturating_sub(suffix);
-        return Some((start, file_size - 1));
-    }
-    let start = start_raw.trim().parse::<u64>().ok()?;
-    if start >= file_size {
-        return None;
-    }
-    let end = if end_raw.trim().is_empty() {
-        file_size - 1
-    } else {
-        end_raw.trim().parse::<u64>().ok()?.min(file_size - 1)
-    };
-    (start <= end).then_some((start, end))
-}
-
-fn content_type_for_path(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "webm" => "video/webm",
-        "mov" => "video/quicktime",
-        "mkv" => "video/x-matroska",
-        "avi" => "video/x-msvideo",
-        _ => "video/mp4",
-    }
-}
-
-fn upload_to_pingvin_share_blocking(
-    app: &tauri::AppHandle,
-    input_path: &Path,
-    settings: &PingvinSettings,
-) -> Result<String, String> {
-    if !input_path.exists() {
-        return Err("Input video does not exist.".into());
-    }
-    let local_base = default_if_empty(&settings.local_url, "http://localhost:3000")
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-    let public_base = settings.public_url.trim().trim_end_matches('/').to_string();
-    if local_base.is_empty() {
-        return Err("Pingvin local URL is missing.".into());
-    }
-    if public_base.is_empty() {
-        return Err("Pingvin public URL is missing. Start the Cloudflare tunnel or paste the public tunnel URL.".into());
-    }
-
-    emit_progress(app, "Pingvin Upload", "Creating share...".to_string());
-    let create_body = json!({
-        "expiration": empty_to_null(&settings.expiration),
-        "recipients": [],
-        "security": {
-            "password": empty_to_null(&settings.password),
-            "maxViews": settings.visitor_limit.trim().parse::<u64>().ok(),
-        }
-    });
-    let create = pingvin_json_request(
-        &format!("{local_base}/api/shares"),
-        &settings.token,
-        create_body,
-    )?;
-    let share_id = find_first_string(&create, &["id", "shareId", "share_id"])
-        .ok_or_else(|| format!("Pingvin create share response did not include an id: {create}"))?;
-
-    emit_progress(
-        app,
-        "Pingvin Upload",
-        format!("Uploading to share {share_id}..."),
-    );
-    let file_name = input_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("video.mp4")
-        .to_string();
-    let form = ureq::unversioned::multipart::Form::new()
-        .text("shareId", &share_id)
-        .text("id", &share_id)
-        .file("file", input_path)
-        .map_err(|err| format!("Failed to prepare Pingvin upload: {err}"))?;
-    let mut upload_request = ureq::post(&format!("{local_base}/api/files"))
-        .header("User-Agent", "videomaxxxing-local-tool")
-        .header("Accept", "application/json");
-    if !settings.token.trim().is_empty() {
-        upload_request = upload_request.header(
-            "Authorization",
-            &format!("Bearer {}", settings.token.trim()),
-        );
-    }
-    let mut upload_response = upload_request
-        .send(form)
-        .map_err(|err| format!("Pingvin file upload failed: {err}"))?;
-    let upload_status = upload_response.status().as_u16();
-    let upload_text = upload_response
-        .body_mut()
-        .read_to_string()
-        .unwrap_or_default();
-    if !(200..300).contains(&upload_status) {
-        return Err(format!(
-            "Pingvin upload failed with HTTP {upload_status}: {upload_text}"
-        ));
-    }
-
-    emit_progress(app, "Pingvin Upload", "Completing share...".to_string());
-    let complete = pingvin_json_request(
-        &format!("{local_base}/api/shares/{share_id}/complete"),
-        &settings.token,
-        json!({}),
-    )?;
-    let url = find_first_url(&complete)
-        .or_else(|| find_first_string(&complete, &["url", "shareUrl", "publicUrl", "link"]))
-        .map(|url| replace_url_origin(&url, &public_base))
-        .unwrap_or_else(|| format!("{public_base}/s/{share_id}"));
-    emit_progress(
-        app,
-        "Pingvin Upload",
-        format!("Uploaded {file_name}: {url}"),
-    );
-    Ok(url)
-}
-
 fn emit_progress(app: &tauri::AppHandle, stage: &str, message: String) {
     let _ = app.emit(
         "upscale-progress",
@@ -3154,81 +2218,6 @@ fn social_video_filter(options: &SocialExportOptions, include_gradfun: bool) -> 
     parts.join(",")
 }
 
-fn empty_to_null(value: &str) -> Value {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        Value::Null
-    } else {
-        Value::String(trimmed.to_string())
-    }
-}
-
-fn pingvin_json_request(url: &str, token: &str, body: Value) -> Result<Value, String> {
-    let mut request = ureq::post(url)
-        .header("User-Agent", "videomaxxxing-local-tool")
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json");
-    if !token.trim().is_empty() {
-        request = request.header("Authorization", &format!("Bearer {}", token.trim()));
-    }
-    let mut response = request
-        .send_json(body)
-        .map_err(|err| format!("Pingvin request to {url} failed: {err}"))?;
-    let status = response.status().as_u16();
-    let text = response.body_mut().read_to_string().unwrap_or_default();
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "Pingvin request to {url} failed with HTTP {status}: {text}"
-        ));
-    }
-    if text.trim().is_empty() {
-        Ok(json!({}))
-    } else {
-        serde_json::from_str(&text).map_err(|err| {
-            format!("Pingvin response from {url} was not valid JSON: {err}. Body: {text}")
-        })
-    }
-}
-
-fn find_first_string(value: &Value, keys: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for key in keys {
-                if let Some(text) = map.get(*key).and_then(Value::as_str) {
-                    if !text.trim().is_empty() {
-                        return Some(text.to_string());
-                    }
-                }
-            }
-            map.values().find_map(|item| find_first_string(item, keys))
-        }
-        Value::Array(items) => items.iter().find_map(|item| find_first_string(item, keys)),
-        _ => None,
-    }
-}
-
-fn find_first_url(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) if text.starts_with("http://") || text.starts_with("https://") => {
-            Some(text.to_string())
-        }
-        Value::Object(map) => map.values().find_map(find_first_url),
-        Value::Array(items) => items.iter().find_map(find_first_url),
-        _ => None,
-    }
-}
-
-fn pretty_json_or_raw(text: &str) -> String {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| text.to_string())
-}
-
-fn default_pingvin_local_url() -> String {
-    "http://localhost:3000".to_string()
-}
-
 fn file_size(path: &Path) -> u64 {
     fs::metadata(path)
         .map(|metadata| metadata.len())
@@ -3286,72 +2275,7 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default();
     }
-    if settings.segmind_input_mode == "pingvin" {
-        settings.segmind_input_mode = "local_bridge".to_string();
-    }
-    if settings.pingvin.local_url.trim().is_empty() {
-        settings.pingvin.local_url = default_pingvin_local_url();
-    }
-    if settings.pingvin.public_url.trim().is_empty() && !settings.pingvin.base_url.trim().is_empty()
-    {
-        settings.pingvin.public_url = settings.pingvin.base_url.clone();
-    }
     settings
-}
-
-fn cloudflare_tunnel_slot() -> &'static Mutex<Option<Child>> {
-    CLOUDFLARE_TUNNEL.get_or_init(|| Mutex::new(None))
-}
-
-fn extract_trycloudflare_url(line: &str) -> Option<String> {
-    line.split_whitespace()
-        .map(|part| {
-            part.trim_matches(|character: char| {
-                matches!(character, '"' | '\'' | ',' | ';' | ')' | '(')
-            })
-        })
-        .find(|part| part.starts_with("https://") && part.contains(".trycloudflare.com"))
-        .map(|part| part.trim_end_matches('/').to_string())
-}
-
-fn replace_url_origin(url: &str, public_base: &str) -> String {
-    let public_base = public_base.trim_end_matches('/');
-    for scheme in ["http://", "https://"] {
-        if let Some(rest) = url.strip_prefix(scheme) {
-            if let Some((_, path)) = rest.split_once('/') {
-                return format!("{public_base}/{path}");
-            }
-        }
-    }
-    url.to_string()
-}
-
-fn pingvin_dir() -> PathBuf {
-    workspace_root().join("tools").join("pingvin")
-}
-
-fn ensure_pingvin_compose() -> Result<(), String> {
-    let dir = pingvin_dir();
-    fs::create_dir_all(dir.join("data")).map_err(|err| err.to_string())?;
-    fs::create_dir_all(dir.join("images")).map_err(|err| err.to_string())?;
-    let compose_path = dir.join("docker-compose.yml");
-    if !compose_path.exists() {
-        fs::write(&compose_path, pingvin_compose()).map_err(|err| err.to_string())?;
-    }
-    Ok(())
-}
-
-fn pingvin_compose() -> &'static str {
-    r#"services:
-  pingvin-share-x:
-    image: smp46/pingvin-share-x:latest
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./data:/opt/app/backend/data
-      - ./images:/opt/app/frontend/public/img
-"#
 }
 
 fn facefusion_tool_dir() -> PathBuf {
@@ -3690,10 +2614,6 @@ fn local_tool_candidates(name: &str) -> Vec<PathBuf> {
                 .join("condabin")
                 .join("conda.bat"),
         ],
-        "cloudflared" => vec![root
-            .join("tools")
-            .join("cloudflared")
-            .join("cloudflared.exe")],
         _ => Vec::new(),
     }
 }
@@ -4043,12 +2963,6 @@ fn timestamp_id() -> String {
     millis.to_string()
 }
 
-fn short_path_hash(path: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
-    path.to_string_lossy().to_lowercase().hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
 fn default_if_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -4153,20 +3067,11 @@ pub fn run() {
             run_upscale_job,
             run_rife_job,
             run_facefusion_job,
-            run_segmind_topaz_job,
-            upload_to_pingvin_share,
             cancel_upscale_job,
             cancel_facefusion_job,
             install_or_update_facefusion,
             update_ffmpeg,
             update_miniforge,
-            update_cloudflared,
-            start_cloudflare_tunnel,
-            stop_cloudflare_tunnel,
-            install_pingvin,
-            start_pingvin,
-            stop_pingvin,
-            pingvin_status,
             update_realesrgan,
             update_rife,
             compare_realesrgan_models
