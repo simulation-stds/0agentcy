@@ -11,12 +11,50 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     sync::mpsc,
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::Emitter;
 
 static CANCEL_UPSCALE: AtomicBool = AtomicBool::new(false);
 const FACEFUSION_ENV_NAME: &str = "videotools-facefusion";
+const SUPIR_ENV_NAME: &str = "videotools-supir";
+const SUPIR_TORCH_VERSION: &str = "torch==2.1.2+cu121";
+const SUPIR_TORCHVISION_VERSION: &str = "torchvision==0.16.2+cu121";
+const SUPIR_TORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cu121";
+const SUPIR_XFORMERS_VERSION: &str = "xformers==0.0.23.post1";
+const SUPIR_XFORMERS_CHECK_SCRIPT: &str = r#"
+import importlib.metadata as metadata
+import json
+import sys
+
+version = ""
+try:
+    version = metadata.version("xformers")
+    import torch
+    import xformers.ops
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available to validate xFormers.")
+
+    q = torch.randn((1, 16, 1, 32), device="cuda", dtype=torch.float16)
+    k = torch.randn((1, 16, 1, 32), device="cuda", dtype=torch.float16)
+    v = torch.randn((1, 16, 1, 32), device="cuda", dtype=torch.float16)
+    out = xformers.ops.memory_efficient_attention(q, k, v)
+    torch.cuda.synchronize()
+
+    print(json.dumps({
+        "ready": True,
+        "version": version,
+        "message": f"xFormers CUDA attention is ready ({tuple(out.shape)}).",
+    }))
+except Exception as exc:
+    print(json.dumps({
+        "ready": False,
+        "version": version,
+        "message": str(exc),
+    }))
+    sys.exit(1)
+"#;
 
 #[derive(Serialize)]
 struct ToolStatus {
@@ -24,10 +62,33 @@ struct ToolStatus {
     ffprobe: Option<String>,
     realesrgan: Option<String>,
     rife: Option<String>,
+    supir: Option<String>,
     facefusion: Option<String>,
     git: Option<String>,
     conda: Option<String>,
     cudnn: Option<String>,
+    imagemagick: Option<String>,
+    oxipng: Option<String>,
+    libavif: Option<String>,
+    libwebp: Option<String>,
+    mozjpeg: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAvailability {
+    ffmpeg: bool,
+    miniforge: bool,
+    realesrgan: bool,
+    rife: bool,
+    facefusion: bool,
+    supir: bool,
+    supir_xformers: bool,
+    imagemagick: bool,
+    oxipng: bool,
+    libavif: bool,
+    libwebp: bool,
+    mozjpeg: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -36,9 +97,21 @@ struct AppSettings {
     #[serde(default)]
     default_download_folder: String,
     #[serde(default)]
+    temp_folder: String,
+    #[serde(default)]
     cuda_bin_folder: String,
     #[serde(default)]
     cudnn_bin_folder: String,
+    #[serde(default)]
+    preferred_model_device: String,
+    #[serde(default = "default_true")]
+    play_notifications: bool,
+    #[serde(default = "default_true")]
+    show_info_icons: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -48,12 +121,16 @@ impl Default for AppSettings {
                 .join("output")
                 .to_string_lossy()
                 .to_string(),
+            temp_folder: workspace_root().join("temp").to_string_lossy().to_string(),
             cuda_bin_folder: find_cuda_bin_dir()
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default(),
             cudnn_bin_folder: find_cudnn_bin_dir()
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_default(),
+            preferred_model_device: String::new(),
+            play_notifications: true,
+            show_info_icons: true,
         }
     }
 }
@@ -69,8 +146,43 @@ struct VideoMetadata {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AudioMetadata {
+    duration: f64,
+    codec: String,
+    sample_rate: u64,
+    channels: u64,
+    bit_rate: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Thumbnail {
     time: f64,
+    data_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GifFrameData {
+    index: usize,
+    delay_ms: u64,
+    data_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GifFrameSet {
+    width: u64,
+    height: u64,
+    total_duration_ms: u64,
+    frames: Vec<GifFrameData>,
+    log: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GifFrameInput {
+    delay_ms: u64,
     data_url: String,
 }
 
@@ -119,6 +231,24 @@ struct RifeModel {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SupirModel {
+    name: String,
+    label: String,
+    file_name: String,
+    description: String,
+    required: bool,
+    installed: bool,
+    installed_path: String,
+    direct_download: bool,
+    size_bytes: u64,
+    size_label: String,
+    estimated_size_label: String,
+    source_label: String,
+    download_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct FaceFusionStatus {
     state: String,
     repo_path: String,
@@ -128,6 +258,23 @@ struct FaceFusionStatus {
     available_providers: Vec<String>,
     runtime_label: String,
     provider_warning: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupirStatus {
+    state: String,
+    repo_path: String,
+    env_name: String,
+    checkpoint_path: String,
+    current_size_label: String,
+    estimated_install_label: String,
+    cuda_ready: bool,
+    checkpoints_ready: bool,
+    xformers_ready: bool,
+    xformers_version: String,
+    xformers_message: String,
     message: String,
 }
 
@@ -146,13 +293,14 @@ struct ToolStorage {
 struct ProgressEvent {
     stage: String,
     message: String,
+    progress: Option<f64>,
+    step: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JobOptions {
     input_path: String,
-    output_folder: String,
     output_name: String,
     action: String,
     trim_start: f64,
@@ -168,11 +316,20 @@ struct JobResult {
     log: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageCompressResult {
+    output_path: String,
+    log: String,
+    input_size_label: String,
+    output_size_label: String,
+    saved_label: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpscaleOptions {
     input_path: String,
-    output_folder: String,
     output_name: String,
     model: String,
     device: Option<String>,
@@ -189,7 +346,6 @@ struct UpscaleOptions {
 #[serde(rename_all = "camelCase")]
 struct RifeOptions {
     input_path: String,
-    output_folder: String,
     output_name: String,
     model: String,
     device: Option<String>,
@@ -209,7 +365,6 @@ struct RifeOptions {
 #[serde(rename_all = "camelCase")]
 struct SocialExportOptions {
     input_path: String,
-    output_folder: String,
     output_name: String,
     format: String,
     trim_start: f64,
@@ -229,12 +384,65 @@ struct SocialExportOptions {
 struct FaceFusionOptions {
     input_path: String,
     source_path: String,
-    output_folder: String,
     output_name: String,
     processor_preset: String,
     execution_provider: String,
     trim_start: f64,
     trim_end: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioJobOptions {
+    input_path: String,
+    output_name: String,
+    action: String,
+    output_format: String,
+    trim_start: f64,
+    trim_end: f64,
+    bitrate: String,
+    sample_rate: String,
+    channels: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SupirImageOptions {
+    input_path: String,
+    output_name: String,
+    model: String,
+    preset: String,
+    device: Option<String>,
+    upscale: String,
+    use_llava: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageCompressOptions {
+    input_path: String,
+    output_name: String,
+    format: String,
+    quality: u8,
+    lossless: bool,
+    effort: String,
+    keep_metadata: bool,
+    preserve_animation: bool,
+    #[serde(default)]
+    reduce_palette: bool,
+    #[serde(default)]
+    palette_colors: u16,
+    #[serde(default)]
+    palette_dither: bool,
+    preview_only: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveImageCompressPreviewOptions {
+    preview_path: String,
+    output_name: String,
+    format: String,
 }
 
 #[tauri::command]
@@ -244,13 +452,96 @@ fn detect_tools() -> ToolStatus {
         ffprobe: find_tool("ffprobe"),
         realesrgan: find_tool("realesrgan-ncnn-vulkan"),
         rife: find_tool("rife-ncnn-vulkan"),
+        supir: supir_repo_ready().then(|| supir_repo_dir().to_string_lossy().to_string()),
         facefusion: facefusion_repo_ready()
             .then(|| facefusion_repo_dir().to_string_lossy().to_string()),
         git: find_tool("git"),
         conda: find_tool("conda"),
         cudnn: find_cudnn_runtime(),
+        imagemagick: find_tool("magick"),
+        oxipng: find_tool("oxipng"),
+        libavif: find_tool("avifenc"),
+        libwebp: find_tool("cwebp"),
+        mozjpeg: find_tool("cjpeg"),
     }
     .stringify()
+}
+
+#[tauri::command]
+async fn check_tool_updates() -> Result<UpdateAvailability, String> {
+    tauri::async_runtime::spawn_blocking(check_tool_updates_blocking)
+        .await
+        .map_err(|err| format!("Update check task failed: {err}"))
+}
+
+fn check_tool_updates_blocking() -> UpdateAvailability {
+    let git = find_tool("git");
+    let facefusion = git
+        .as_deref()
+        .map(|git| git_repo_has_update(git, &facefusion_repo_dir()))
+        .unwrap_or(false);
+    let supir = git
+        .as_deref()
+        .map(|git| git_repo_has_update(git, &supir_repo_dir()))
+        .unwrap_or(false);
+
+    UpdateAvailability {
+        ffmpeg: false,
+        miniforge: false,
+        realesrgan: false,
+        rife: false,
+        facefusion,
+        supir,
+        supir_xformers: false,
+        imagemagick: false,
+        oxipng: false,
+        libavif: false,
+        libwebp: false,
+        mozjpeg: false,
+    }
+}
+
+fn git_repo_has_update(git: &str, repo_dir: &Path) -> bool {
+    if !repo_dir.join(".git").exists() {
+        return false;
+    }
+
+    let fetch_ok = Command::new(git)
+        .args(["-C"])
+        .arg(repo_dir)
+        .args(["fetch", "--quiet"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+
+    if !fetch_ok {
+        return false;
+    }
+
+    let Some(local_head) = git_rev_parse(git, repo_dir, "HEAD") else {
+        return false;
+    };
+    let Some(upstream_head) = git_rev_parse(git, repo_dir, "@{u}") else {
+        return false;
+    };
+
+    local_head != upstream_head
+}
+
+fn git_rev_parse(git: &str, repo_dir: &Path, rev: &str) -> Option<String> {
+    let output = Command::new(git)
+        .args(["-C"])
+        .arg(repo_dir)
+        .args(["rev-parse", rev])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 #[tauri::command]
@@ -302,6 +593,60 @@ fn probe_video(path: String) -> Result<VideoMetadata, String> {
         width: stream["width"].as_u64().unwrap_or(0),
         height: stream["height"].as_u64().unwrap_or(0),
         codec: stream["codec_name"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+#[tauri::command]
+fn probe_audio(path: String) -> Result<AudioMetadata, String> {
+    let input_path = PathBuf::from(path);
+    if !input_path.exists() {
+        return Err("Input audio does not exist.".into());
+    }
+
+    let ffprobe = find_tool("ffprobe").ok_or("FFprobe was not found.")?;
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels,bit_rate",
+            "-show_entries",
+            "format=duration,bit_rate",
+            "-of",
+            "json",
+        ])
+        .arg(&input_path)
+        .output()
+        .map_err(|err| format!("Failed to run FFprobe: {err}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let data: Value = serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+    let stream = data["streams"]
+        .as_array()
+        .and_then(|streams| streams.first())
+        .ok_or("No audio stream found.")?;
+
+    Ok(AudioMetadata {
+        duration: data["format"]["duration"]
+            .as_str()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0),
+        codec: stream["codec_name"].as_str().unwrap_or("").to_string(),
+        sample_rate: stream["sample_rate"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        channels: stream["channels"].as_u64().unwrap_or(0),
+        bit_rate: stream["bit_rate"]
+            .as_str()
+            .or_else(|| data["format"]["bit_rate"].as_str())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
     })
 }
 
@@ -499,6 +844,36 @@ fn list_rife_models() -> Result<Vec<RifeModel>, String> {
 }
 
 #[tauri::command]
+fn list_supir_models() -> Result<Vec<SupirModel>, String> {
+    let mut models = Vec::new();
+    for spec in supir_model_specs() {
+        let path = supir_checkpoint_dir().join(spec.file_name);
+        let installed = path.exists();
+        let size_bytes = installed.then(|| file_size(&path)).unwrap_or(0);
+        models.push(SupirModel {
+            name: spec.name.to_string(),
+            label: spec.label.to_string(),
+            file_name: spec.file_name.to_string(),
+            description: spec.description.to_string(),
+            required: spec.required,
+            installed,
+            installed_path: installed
+                .then(|| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            direct_download: spec.direct_download,
+            size_bytes,
+            size_label: installed
+                .then(|| format_bytes(size_bytes))
+                .unwrap_or_default(),
+            estimated_size_label: spec.estimate.to_string(),
+            source_label: spec.source_label.to_string(),
+            download_url: spec.download_url.to_string(),
+        });
+    }
+    Ok(models)
+}
+
+#[tauri::command]
 fn get_tool_storage() -> Vec<ToolStorage> {
     let root = workspace_root().join("tools");
     let items = [
@@ -533,10 +908,46 @@ fn get_tool_storage() -> Vec<ToolStorage> {
             "~180-800 MB depending on models",
         ),
         (
+            "supir",
+            "SUPIR",
+            root.join("supir"),
+            "~20-80 GB depending on checkpoints",
+        ),
+        (
             "facefusion",
             "FaceFusion",
             root.join("facefusion"),
             "~2-8 GB depending on runtime and models",
+        ),
+        (
+            "imagemagick",
+            "ImageMagick",
+            root.join("imagemagick"),
+            "~80-250 MB installed",
+        ),
+        (
+            "oxipng",
+            "OxiPNG",
+            root.join("oxipng"),
+            "~5-20 MB installed",
+        ),
+        (
+            "libavif",
+            "libavif",
+            root.join("libavif"),
+            "~10-40 MB installed",
+        ),
+        (
+            "libwebp",
+            "libwebp",
+            root.join("libwebp"),
+            "~10-50 MB installed",
+        ),
+        (
+            "mozjpeg",
+            "MozJPEG",
+            root.join("mozjpeg"),
+            "~10-50 MB installed",
         ),
     ];
 
@@ -577,6 +988,62 @@ fn default_output_dir() -> Result<String, String> {
     Ok(output.to_string_lossy().to_string())
 }
 
+enum OutputKind {
+    Video,
+    Image,
+    Audio,
+}
+
+impl OutputKind {
+    fn folder_name(&self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Image => "image",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+fn output_dir_for(kind: OutputKind) -> Result<PathBuf, String> {
+    let settings = get_app_settings()?;
+    let root = if settings.default_download_folder.trim().is_empty() {
+        workspace_root().join("output")
+    } else {
+        PathBuf::from(settings.default_download_folder)
+    };
+    let output_dir = root.join(kind.folder_name());
+    fs::create_dir_all(&output_dir).map_err(|err| err.to_string())?;
+    Ok(output_dir)
+}
+
+fn ffmpeg_output_kind(action: &str, audio_format: Option<&str>) -> OutputKind {
+    match action {
+        "extract_frame" => OutputKind::Image,
+        "video_audio" if audio_format == Some("wav") || audio_format == Some("mp3") => {
+            OutputKind::Audio
+        }
+        _ => OutputKind::Video,
+    }
+}
+
+fn ffmpeg_progress_step(action: &str, audio_format: Option<&str>) -> &'static str {
+    match action {
+        "trim_mp4" => "Encoding video",
+        "extract_frame" => "Extracting frame",
+        "video_audio" if audio_format == Some("wav") || audio_format == Some("mp3") => {
+            "Extracting audio"
+        }
+        _ => "Processing media",
+    }
+}
+
+fn social_output_kind(format: &str) -> OutputKind {
+    match format {
+        "gif" | "webp" | "apng" => OutputKind::Image,
+        _ => OutputKind::Video,
+    }
+}
+
 #[tauri::command]
 fn get_app_settings() -> Result<AppSettings, String> {
     let path = app_settings_path();
@@ -603,11 +1070,42 @@ fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-fn save_text_to_downloads(output_name: String, text: String) -> Result<JobResult, String> {
-    let folder = PathBuf::from(get_app_settings()?.default_download_folder);
-    fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
+fn flush_temp_folder() -> Result<JobResult, String> {
+    let temp_dir = PathBuf::from(get_app_settings()?.temp_folder);
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir)
+            .map_err(|err| format!("Failed to flush {}: {err}", temp_dir.display()))?;
+    }
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    Ok(JobResult {
+        output_path: temp_dir.to_string_lossy().to_string(),
+        log: format!("Flushed temp folder: {}", temp_dir.display()),
+    })
+}
+
+#[tauri::command]
+fn save_text_to_downloads(
+    app: tauri::AppHandle,
+    output_name: String,
+    text: String,
+) -> Result<JobResult, String> {
+    emit_progress_detail(
+        &app,
+        "Image Export",
+        "Preparing text export".to_string(),
+        Some(5.0),
+        Some("Saving output"),
+    );
+    let folder = output_dir_for(OutputKind::Image)?;
     let output_path = folder.join(safe_output_filename(&output_name, "download.txt"));
     fs::write(&output_path, text).map_err(|err| err.to_string())?;
+    emit_progress_detail(
+        &app,
+        "Image Export",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
         log: format!("Saved {}", output_path.display()),
@@ -615,17 +1113,34 @@ fn save_text_to_downloads(output_name: String, text: String) -> Result<JobResult
 }
 
 #[tauri::command]
-fn save_data_url_to_downloads(output_name: String, data_url: String) -> Result<JobResult, String> {
+fn save_data_url_to_downloads(
+    app: tauri::AppHandle,
+    output_name: String,
+    data_url: String,
+) -> Result<JobResult, String> {
+    emit_progress_detail(
+        &app,
+        "Image Export",
+        "Preparing image export".to_string(),
+        Some(5.0),
+        Some("Saving output"),
+    );
     let (_, encoded) = data_url
         .split_once(',')
         .ok_or("Data URL did not contain encoded data.")?;
     let bytes = general_purpose::STANDARD
         .decode(encoded)
         .map_err(|err| format!("Data URL decode failed: {err}"))?;
-    let folder = PathBuf::from(get_app_settings()?.default_download_folder);
-    fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
+    let folder = output_dir_for(OutputKind::Image)?;
     let output_path = folder.join(safe_output_filename(&output_name, "download.bin"));
     fs::write(&output_path, bytes).map_err(|err| err.to_string())?;
+    emit_progress_detail(
+        &app,
+        "Image Export",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
         log: format!("Saved {}", output_path.display()),
@@ -633,25 +1148,446 @@ fn save_data_url_to_downloads(output_name: String, data_url: String) -> Result<J
 }
 
 #[tauri::command]
-fn run_ffmpeg_job(options: JobOptions) -> Result<JobResult, String> {
+fn extract_gif_frames(app: tauri::AppHandle, input_path: String) -> Result<GifFrameSet, String> {
+    let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+    let input_path = PathBuf::from(input_path);
+    if !input_path.exists() {
+        return Err("GIF input does not exist.".into());
+    }
+
+    let temp_dir = workspace_root()
+        .join("temp")
+        .join(format!("gif_frames_{}", timestamp_id()));
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let frame_pattern = temp_dir.join("frame_%08d.png");
+    let mut log = String::new();
+
+    emit_progress_detail(
+        &app,
+        "GIF decode",
+        "Extracting GIF frames".to_string(),
+        Some(5.0),
+        Some("Preparing frames"),
+    );
+
+    let mut command = Command::new(&ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(&input_path)
+        .args(["-vsync", "0"])
+        .arg(&frame_pattern);
+    run_stage_progress(
+        &app,
+        "GIF decode",
+        &mut command,
+        None,
+        None,
+        &mut log,
+        JobProgressRange::new(5.0, 80.0, "Extracting GIF frames"),
+    )?;
+
+    let mut frame_paths = fs::read_dir(&temp_dir)
+        .map_err(|err| err.to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("png"))
+        })
+        .collect::<Vec<_>>();
+    frame_paths.sort();
+
+    if frame_paths.is_empty() {
+        fs::remove_dir_all(&temp_dir).ok();
+        return Err("GIF did not produce any frames.".into());
+    }
+
+    let delays = gif_frame_delays_ms(&input_path, frame_paths.len());
+    let (width, height) = probe_image_dimensions(&input_path).unwrap_or((0, 0));
+    let mut total_duration_ms = 0_u64;
+    let frames = frame_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let delay_ms = delays.get(index).copied().unwrap_or(100).max(10);
+            total_duration_ms = total_duration_ms.saturating_add(delay_ms);
+            Ok(GifFrameData {
+                index,
+                delay_ms,
+                data_url: image_data_url(path, "image/png")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    emit_progress_detail(
+        &app,
+        "GIF decode",
+        format!("Prepared {} GIF frames", frames.len()),
+        Some(100.0),
+        Some("Frames ready"),
+    );
+    fs::remove_dir_all(&temp_dir).ok();
+
+    Ok(GifFrameSet {
+        width,
+        height,
+        total_duration_ms,
+        frames,
+        log: format!(
+            "GIF frames ready: {} frames, {:.2}s",
+            frame_paths.len(),
+            total_duration_ms as f64 / 1000.0
+        ),
+    })
+}
+
+#[tauri::command]
+fn save_gif_frames_to_downloads(
+    app: tauri::AppHandle,
+    output_name: String,
+    frames: Vec<GifFrameInput>,
+) -> Result<JobResult, String> {
+    if frames.is_empty() {
+        return Err("No GIF frames were provided.".into());
+    }
+    let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+    let output_path = output_dir_for(OutputKind::Image)?.join(output_gif_name(&output_name));
+    let temp_dir = workspace_root()
+        .join("temp")
+        .join(format!("dither_gif_{}", timestamp_id()));
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let palette_path = temp_dir.join("palette.png");
+    let concat_path = temp_dir.join("frames.txt");
+    let mut concat = String::new();
+    let mut log = String::new();
+
+    emit_progress_detail(
+        &app,
+        "GIF export",
+        "Preparing animated GIF frames".to_string(),
+        Some(5.0),
+        Some("Saving frames"),
+    );
+
+    for (index, frame) in frames.iter().enumerate() {
+        let frame_path = temp_dir.join(format!("frame_{:08}.png", index + 1));
+        write_data_url_to_path(&frame.data_url, &frame_path)?;
+        concat.push_str(&format!("file '{}'\n", concat_file_path(&frame_path)));
+        concat.push_str(&format!(
+            "duration {:.4}\n",
+            frame.delay_ms.max(10) as f64 / 1000.0
+        ));
+    }
+    if let Some(last_path) =
+        (frames.len() > 0).then(|| temp_dir.join(format!("frame_{:08}.png", frames.len())))
+    {
+        concat.push_str(&format!("file '{}'\n", concat_file_path(&last_path)));
+    }
+    fs::write(&concat_path, concat).map_err(|err| err.to_string())?;
+
+    let mut palette = Command::new(&ffmpeg);
+    palette
+        .arg("-hide_banner")
+        .arg("-y")
+        .args(["-f", "concat", "-safe", "0"])
+        .arg("-i")
+        .arg(&concat_path)
+        .arg("-vf")
+        .arg("palettegen=max_colors=256")
+        .args(["-frames:v", "1", "-update", "1"])
+        .arg(&palette_path);
+    run_stage_progress(
+        &app,
+        "GIF palette",
+        &mut palette,
+        None,
+        None,
+        &mut log,
+        JobProgressRange::new(10.0, 35.0, "Generating GIF palette"),
+    )?;
+
+    let mut gif = Command::new(&ffmpeg);
+    gif.arg("-hide_banner")
+        .arg("-y")
+        .args(["-f", "concat", "-safe", "0"])
+        .arg("-i")
+        .arg(&concat_path)
+        .arg("-i")
+        .arg(&palette_path)
+        .arg("-lavfi")
+        .arg("paletteuse=dither=sierra2_4a")
+        .arg("-loop")
+        .arg("0")
+        .arg(&output_path);
+    run_stage_progress(
+        &app,
+        "GIF export",
+        &mut gif,
+        None,
+        None,
+        &mut log,
+        JobProgressRange::new(35.0, 95.0, "Encoding GIF"),
+    )?;
+
+    fs::remove_dir_all(&temp_dir).ok();
+    emit_progress_detail(
+        &app,
+        "GIF export",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: format!("Saved {}", output_path.display()),
+    })
+}
+
+#[tauri::command]
+async fn run_image_compress_job(
+    app: tauri::AppHandle,
+    options: ImageCompressOptions,
+) -> Result<ImageCompressResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_image_compress_job_blocking(app, options))
+        .await
+        .map_err(|err| format!("Image compressor task failed: {err}"))?
+}
+
+fn run_image_compress_job_blocking(
+    app: tauri::AppHandle,
+    options: ImageCompressOptions,
+) -> Result<ImageCompressResult, String> {
+    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
+    let input_path = PathBuf::from(&options.input_path);
+    if !input_path.exists() {
+        return Err("Input image does not exist.".into());
+    }
+
+    let format = normalized_image_compress_format(&options.format);
+    let quality = options.quality.clamp(1, 100);
+    let temp_dir = workspace_root()
+        .join("temp")
+        .join(format!("image_compress_{}", timestamp_id()));
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let output_path = if options.preview_only {
+        temp_dir.join(image_compress_output_name("compress_preview", format))
+    } else {
+        output_dir_for(OutputKind::Image)?
+            .join(image_compress_output_name(&options.output_name, format))
+    };
+    let mut log = String::new();
+    let animated_input = is_gif_path(&input_path);
+    let preserve_animation = options.preserve_animation && animated_input;
+    let reduced_input = if options.reduce_palette && !(animated_input && preserve_animation) {
+        Some(reduce_palette_still(
+            &app,
+            &input_path,
+            &temp_dir,
+            &options,
+            &mut log,
+        )?)
+    } else {
+        if options.reduce_palette && animated_input && preserve_animation && format != "gif" {
+            log.push_str(
+                "Palette reduction for animated inputs is applied only to GIF output for now.\n",
+            );
+        }
+        None
+    };
+    let compressor_input = reduced_input.as_deref().unwrap_or(&input_path);
+
+    emit_progress_detail(
+        &app,
+        "Image Compressor",
+        format!("Input: {}", input_path.display()),
+        Some(5.0),
+        Some("Preparing input"),
+    );
+
+    let result = match format {
+        "png" => compress_to_png(
+            &app,
+            compressor_input,
+            &output_path,
+            &temp_dir,
+            &options,
+            &mut log,
+        ),
+        "jpg" => compress_to_jpeg(
+            &app,
+            compressor_input,
+            &output_path,
+            &temp_dir,
+            quality,
+            &options,
+            &mut log,
+        ),
+        "webp" => compress_to_webp(
+            &app,
+            if preserve_animation {
+                &input_path
+            } else {
+                compressor_input
+            },
+            &output_path,
+            &temp_dir,
+            quality,
+            &options,
+            preserve_animation,
+            &mut log,
+        ),
+        "avif" => compress_to_avif(
+            &app,
+            compressor_input,
+            &output_path,
+            &temp_dir,
+            quality,
+            &options,
+            &mut log,
+        ),
+        "gif" => compress_to_gif(
+            &app,
+            if preserve_animation {
+                &input_path
+            } else {
+                compressor_input
+            },
+            &output_path,
+            &temp_dir,
+            quality,
+            preserve_animation,
+            &options,
+            &mut log,
+        ),
+        "apng" => compress_to_apng(
+            &app,
+            if preserve_animation {
+                &input_path
+            } else {
+                compressor_input
+            },
+            &output_path,
+            &temp_dir,
+            preserve_animation,
+            &options,
+            &mut log,
+        ),
+        _ => Err("Unsupported image compressor format.".into()),
+    };
+
+    result?;
+    if !options.preview_only {
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    let input_size = file_size(&input_path);
+    let output_size = file_size(&output_path);
+    let saved = input_size.saturating_sub(output_size);
+    let saved_label = if input_size > 0 && output_size <= input_size {
+        let ratio = (saved as f64 / input_size as f64) * 100.0;
+        format!("Saved {} ({ratio:.1}%)", format_bytes(saved))
+    } else {
+        "Output is larger than source".to_string()
+    };
+
+    emit_progress_detail(
+        &app,
+        "Image Compressor",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+
+    if !options.keep_metadata {
+        log.push_str("Metadata: stripped where supported by the selected codec.\n");
+    } else {
+        log.push_str("Metadata: keep metadata requested; external codec support is best-effort.\n");
+    }
+    log.push_str(&format!(
+        "Compressed image: {} -> {}. {saved_label}.\n",
+        format_bytes(input_size),
+        format_bytes(output_size)
+    ));
+
+    Ok(ImageCompressResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log,
+        input_size_label: format_bytes(input_size),
+        output_size_label: format_bytes(output_size),
+        saved_label,
+    })
+}
+
+#[tauri::command]
+fn save_image_compress_preview(
+    app: tauri::AppHandle,
+    options: SaveImageCompressPreviewOptions,
+) -> Result<JobResult, String> {
+    let preview_path = PathBuf::from(&options.preview_path);
+    if !preview_path.exists() {
+        return Err("Compressor preview does not exist. Generate a preview first.".into());
+    }
+    let format = normalized_image_compress_format(&options.format);
+    let output_path = output_dir_for(OutputKind::Image)?
+        .join(image_compress_output_name(&options.output_name, format));
+    emit_progress_detail(
+        &app,
+        "Image Compressor",
+        "Saving compressor preview".to_string(),
+        Some(20.0),
+        Some("Saving output"),
+    );
+    fs::copy(&preview_path, &output_path)
+        .map_err(|err| format!("Failed to save compressor preview: {err}"))?;
+    emit_progress_detail(
+        &app,
+        "Image Compressor",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: format!(
+            "Saved compressed image: {} ({})",
+            output_path.display(),
+            format_bytes(file_size(&output_path))
+        ),
+    })
+}
+
+#[tauri::command]
+fn run_ffmpeg_job(app: tauri::AppHandle, options: JobOptions) -> Result<JobResult, String> {
     let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
     let input_path = PathBuf::from(options.input_path);
     if !input_path.exists() {
         return Err("Input video does not exist.".into());
     }
 
-    let output_folder = PathBuf::from(options.output_folder);
-    fs::create_dir_all(&output_folder).map_err(|err| err.to_string())?;
-
     let output_name = output_name_with_extension(
         &options.output_name,
         &options.action,
         options.audio_format.as_deref(),
     );
-    let output_path = output_folder.join(output_name);
+    let output_path = output_dir_for(ffmpeg_output_kind(
+        &options.action,
+        options.audio_format.as_deref(),
+    ))?
+    .join(output_name);
+    let progress_step = ffmpeg_progress_step(&options.action, options.audio_format.as_deref());
 
     let mut command = Command::new(ffmpeg);
     command.arg("-hide_banner").arg("-y");
+    emit_progress_detail(
+        &app,
+        "FFmpeg",
+        format!("Input: {}", input_path.display()),
+        Some(5.0),
+        Some(progress_step),
+    );
 
     match options.action.as_str() {
         "trim_mp4" => {
@@ -699,23 +1635,24 @@ fn run_ffmpeg_job(options: JobOptions) -> Result<JobResult, String> {
         _ => return Err("Unknown action.".into()),
     }
 
-    let output = command
-        .output()
-        .map_err(|err| format!("Failed to run FFmpeg: {err}"))?;
+    let mut log = String::new();
+    run_stage_progress(
+        &app,
+        "FFmpeg",
+        &mut command,
+        None,
+        None,
+        &mut log,
+        JobProgressRange::new(10.0, 95.0, progress_step),
+    )?;
 
-    let log = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    emit_progress_detail(
+        &app,
+        "FFmpeg",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
     );
-
-    if !output.status.success() {
-        return Err(if log.trim().is_empty() {
-            "FFmpeg failed without output.".into()
-        } else {
-            log
-        });
-    }
 
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
@@ -744,12 +1681,17 @@ fn run_social_export_job_blocking(
         return Err("Input video does not exist.".into());
     }
 
-    let output_folder = PathBuf::from(&options.output_folder);
-    fs::create_dir_all(&output_folder).map_err(|err| err.to_string())?;
-    let output_path = output_folder.join(social_output_name(&options.output_name, &options.format));
+    let output_path = output_dir_for(social_output_kind(&options.format))?
+        .join(social_output_name(&options.output_name, &options.format));
     let mut full_log = String::new();
 
-    emit_progress(&app, "Social Export", format!("Format: {}", options.format));
+    emit_progress_detail(
+        &app,
+        "Social Export",
+        format!("Format: {}", options.format),
+        Some(2.0),
+        Some("Preparing export"),
+    );
 
     if options.format == "gif" {
         let temp_dir = workspace_root()
@@ -768,7 +1710,15 @@ fn run_social_export_job_blocking(
             .arg("-vf")
             .arg(format!("{vf},palettegen=max_colors=256"))
             .arg(&palette_path);
-        run_stage(&app, "GIF palette", &mut palette, None, None, &mut full_log)?;
+        run_stage_progress(
+            &app,
+            "GIF palette",
+            &mut palette,
+            None,
+            None,
+            &mut full_log,
+            JobProgressRange::new(5.0, 30.0, "Generating GIF palette"),
+        )?;
 
         let mut gif = Command::new(&ffmpeg);
         gif.arg("-hide_banner").arg("-y");
@@ -782,7 +1732,15 @@ fn run_social_export_job_blocking(
             .arg("-loop")
             .arg(if options.loop_output { "0" } else { "-1" })
             .arg(&output_path);
-        run_stage(&app, "GIF export", &mut gif, None, None, &mut full_log)?;
+        run_stage_progress(
+            &app,
+            "GIF export",
+            &mut gif,
+            None,
+            None,
+            &mut full_log,
+            JobProgressRange::new(30.0, 95.0, "Encoding GIF"),
+        )?;
         fs::remove_dir_all(&temp_dir).ok();
     } else {
         let mut command = Command::new(&ffmpeg);
@@ -827,21 +1785,91 @@ fn run_social_export_job_blocking(
         }
 
         command.arg(&output_path);
-        run_stage(
+        run_stage_progress(
             &app,
             "Social Export",
             &mut command,
             None,
             None,
             &mut full_log,
+            JobProgressRange::new(10.0, 95.0, "Encoding export"),
         )?;
     }
 
-    emit_progress(
+    emit_progress_detail(
         &app,
         "Social Export",
         format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
     );
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn run_audio_job(
+    app: tauri::AppHandle,
+    options: AudioJobOptions,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_audio_job_blocking(app, options))
+        .await
+        .map_err(|err| format!("Audio task failed: {err}"))?
+}
+
+fn run_audio_job_blocking(
+    app: tauri::AppHandle,
+    options: AudioJobOptions,
+) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
+    let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+    let input_path = PathBuf::from(&options.input_path);
+    if !input_path.exists() {
+        return Err("Input audio does not exist.".into());
+    }
+
+    let format = normalized_audio_format(&options.output_format);
+    let output_name = audio_output_name(&options.output_name, &input_path, format);
+    let output_path = output_dir_for(OutputKind::Audio)?.join(output_name);
+
+    emit_progress_detail(
+        &app,
+        "Audio",
+        format!("Input: {}", input_path.display()),
+        Some(5.0),
+        Some("Preparing audio"),
+    );
+
+    let mut command = Command::new(ffmpeg);
+    command.arg("-hide_banner").arg("-y");
+    if options.action == "trim" || options.action == "trim_convert" {
+        add_trim_args(&mut command, options.trim_start, options.trim_end);
+    }
+    command.arg("-i").arg(&input_path).arg("-vn");
+    add_audio_encode_args(&mut command, format, &options)?;
+    command.arg(&output_path);
+
+    let mut full_log = String::new();
+    run_stage_progress(
+        &app,
+        "Audio",
+        &mut command,
+        None,
+        None,
+        &mut full_log,
+        JobProgressRange::new(10.0, 95.0, "Processing audio"),
+    )?;
+
+    emit_progress_detail(
+        &app,
+        "Audio",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
         log: full_log,
@@ -859,8 +1887,318 @@ fn cancel_facefusion_job() {
 }
 
 #[tauri::command]
+fn cancel_audio_job() {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn cancel_supir_image_job() {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn import_supir_checkpoint(
+    source_path: String,
+    checkpoint_name: String,
+) -> Result<JobResult, String> {
+    let spec = supir_model_spec(&checkpoint_name)
+        .ok_or_else(|| format!("Unknown SUPIR checkpoint: {checkpoint_name}"))?;
+    let source = PathBuf::from(source_path.trim());
+    if !source.is_file() {
+        return Err(format!(
+            "Selected checkpoint was not found: {}",
+            source.display()
+        ));
+    }
+    fs::create_dir_all(supir_checkpoint_dir()).map_err(|err| err.to_string())?;
+    let destination = supir_checkpoint_dir().join(spec.file_name);
+    fs::copy(&source, &destination).map_err(|err| {
+        format!(
+            "Failed to import {} to {}: {err}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    if supir_repo_ready() {
+        write_supir_runtime_files()?;
+    }
+    Ok(JobResult {
+        output_path: destination.to_string_lossy().to_string(),
+        log: format!("Imported {} to {}", spec.file_name, destination.display()),
+    })
+}
+
+#[tauri::command]
+fn import_supir_checkpoint_from_downloads(checkpoint_name: String) -> Result<JobResult, String> {
+    let spec = supir_model_spec(&checkpoint_name)
+        .ok_or_else(|| format!("Unknown SUPIR checkpoint: {checkpoint_name}"))?;
+    let source = find_downloaded_checkpoint(spec.file_name).ok_or_else(|| {
+        format!(
+            "Could not find {} in your Downloads folder. Download it first, or use Choose file.",
+            spec.file_name
+        )
+    })?;
+    import_supir_checkpoint(source.to_string_lossy().to_string(), spec.name.to_string())
+}
+
+#[tauri::command]
+async fn download_supir_checkpoint(
+    app: tauri::AppHandle,
+    checkpoint_name: String,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        download_supir_checkpoint_blocking(app, checkpoint_name)
+    })
+    .await
+    .map_err(|err| format!("SUPIR checkpoint download task failed: {err}"))?
+}
+
+fn download_supir_checkpoint_blocking(
+    app: tauri::AppHandle,
+    checkpoint_name: String,
+) -> Result<JobResult, String> {
+    let spec = supir_model_spec(&checkpoint_name)
+        .ok_or_else(|| format!("Unknown SUPIR checkpoint: {checkpoint_name}"))?;
+    if !spec.direct_download {
+        return Err(format!(
+            "{} is hosted on {}. Open the download page, then import the file.",
+            spec.label, spec.source_label
+        ));
+    }
+    fs::create_dir_all(supir_checkpoint_dir()).map_err(|err| err.to_string())?;
+    let destination = supir_checkpoint_dir().join(spec.file_name);
+    if destination.exists() {
+        return Ok(JobResult {
+            output_path: destination.to_string_lossy().to_string(),
+            log: format!("{} is already installed.", spec.label),
+        });
+    }
+    emit_progress(
+        &app,
+        "SUPIR checkpoint",
+        format!("Downloading {} ({})", spec.label, spec.estimate),
+    );
+    download_with_progress(&app, "SUPIR checkpoint", spec.resolve_url, &destination)
+        .map_err(|err| format!("Failed to download {}: {err}", spec.label))?;
+    if supir_repo_ready() {
+        write_supir_runtime_files()?;
+    }
+    Ok(JobResult {
+        output_path: destination.to_string_lossy().to_string(),
+        log: format!("Downloaded {} to {}", spec.label, destination.display()),
+    })
+}
+
+#[tauri::command]
+fn delete_supir_checkpoint(checkpoint_name: String) -> Result<JobResult, String> {
+    let spec = supir_model_spec(&checkpoint_name)
+        .ok_or_else(|| format!("Unknown SUPIR checkpoint: {checkpoint_name}"))?;
+    let path = supir_checkpoint_dir().join(spec.file_name);
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|err| format!("Failed to remove {}: {err}", path.display()))?;
+    }
+    Ok(JobResult {
+        output_path: path.to_string_lossy().to_string(),
+        log: format!("Removed {}", spec.file_name),
+    })
+}
+
+#[tauri::command]
 fn detect_facefusion() -> FaceFusionStatus {
     facefusion_status()
+}
+
+#[tauri::command]
+fn detect_supir() -> SupirStatus {
+    supir_status()
+}
+
+#[tauri::command]
+async fn install_or_update_supir_xformers(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || install_or_update_supir_xformers_blocking(app))
+        .await
+        .map_err(|err| format!("SUPIR xFormers install task failed: {err}"))?
+}
+
+fn install_or_update_supir_xformers_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    let conda = find_tool("conda")
+        .ok_or("Conda was not found in PATH. Install Miniforge before installing SUPIR.")?;
+    if !supir_repo_ready() {
+        return Err("SUPIR repo is not installed. Run SUPIR Download first.".into());
+    }
+    if !conda_named_env_ready(&conda, SUPIR_ENV_NAME) {
+        return Err(format!(
+            "SUPIR Conda env {SUPIR_ENV_NAME} is not ready. Run SUPIR Download first."
+        ));
+    }
+
+    let repo_dir = supir_repo_dir();
+    let mut full_log = String::new();
+    install_supir_xformers_stages(&app, &conda, &repo_dir, &mut full_log)?;
+    Ok(JobResult {
+        output_path: repo_dir.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn delete_supir_xformers(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_supir_xformers_blocking(app))
+        .await
+        .map_err(|err| format!("SUPIR xFormers remove task failed: {err}"))?
+}
+
+fn delete_supir_xformers_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    let conda = find_tool("conda")
+        .ok_or("Conda was not found in PATH. Install Miniforge before changing SUPIR.")?;
+    if !conda_named_env_ready(&conda, SUPIR_ENV_NAME) {
+        return Err(format!("SUPIR Conda env {SUPIR_ENV_NAME} is not ready."));
+    }
+
+    let mut full_log = String::new();
+    let mut uninstall = Command::new(&conda);
+    uninstall.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        SUPIR_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "uninstall",
+        "--yes",
+        "xformers",
+    ]);
+    run_stage(
+        &app,
+        "SUPIR xFormers remove",
+        &mut uninstall,
+        Some(supir_repo_dir()),
+        None,
+        &mut full_log,
+    )?;
+    Ok(JobResult {
+        output_path: supir_tool_dir().to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn install_or_update_supir(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || install_or_update_supir_blocking(app))
+        .await
+        .map_err(|err| format!("SUPIR install task failed: {err}"))?
+}
+
+fn install_or_update_supir_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    let git = find_tool("git")
+        .ok_or("Git was not found in PATH. Install Git before installing SUPIR.")?;
+    let conda = find_tool("conda")
+        .ok_or("Conda was not found in PATH. Install Miniforge before installing SUPIR.")?;
+
+    let tool_dir = supir_tool_dir();
+    let repo_dir = supir_repo_dir();
+    fs::create_dir_all(&tool_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(supir_checkpoint_dir()).map_err(|err| err.to_string())?;
+    let mut full_log = String::new();
+
+    if repo_dir.join("test.py").exists() {
+        let mut pull = Command::new(&git);
+        pull.args(["-C"]).arg(&repo_dir).args(["pull", "--ff-only"]);
+        run_stage(&app, "SUPIR update", &mut pull, None, None, &mut full_log)?;
+    } else {
+        if repo_dir.exists() {
+            fs::remove_dir_all(&repo_dir).map_err(|err| err.to_string())?;
+        }
+        let mut clone = Command::new(&git);
+        clone
+            .args(["clone", "https://github.com/Fanghua-Yu/SUPIR"])
+            .arg(&repo_dir);
+        run_stage(&app, "SUPIR clone", &mut clone, None, None, &mut full_log)?;
+    }
+
+    if !conda_named_env_ready(&conda, SUPIR_ENV_NAME) {
+        let mut create = Command::new(&conda);
+        create.args([
+            "create",
+            "--yes",
+            "--name",
+            SUPIR_ENV_NAME,
+            "python=3.8",
+            "pip",
+        ]);
+        run_stage(
+            &app,
+            "SUPIR environment",
+            &mut create,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    }
+
+    write_supir_runtime_files()?;
+
+    let mut install_torch = Command::new(&conda);
+    install_torch.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        SUPIR_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        SUPIR_TORCH_VERSION,
+        SUPIR_TORCHVISION_VERSION,
+        "--index-url",
+        SUPIR_TORCH_INDEX_URL,
+    ]);
+    run_stage(
+        &app,
+        "SUPIR PyTorch",
+        &mut install_torch,
+        Some(repo_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    install_supir_xformers_stages(&app, &conda, &repo_dir, &mut full_log)?;
+
+    let mut install = Command::new(&conda);
+    install.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        SUPIR_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "-r",
+    ]);
+    install.arg(supir_requirements_path());
+    run_stage(
+        &app,
+        "SUPIR dependencies",
+        &mut install,
+        Some(repo_dir),
+        None,
+        &mut full_log,
+    )?;
+
+    emit_progress(
+        &app,
+        "SUPIR",
+        "Installed SUPIR repo and Python environment. Add checkpoints before running.".to_string(),
+    );
+    Ok(JobResult {
+        output_path: supir_repo_dir().to_string_lossy().to_string(),
+        log: full_log,
+    })
 }
 
 #[tauri::command]
@@ -1206,6 +2544,172 @@ fn update_miniforge_blocking(app: tauri::AppHandle) -> Result<JobResult, String>
 }
 
 #[tauri::command]
+async fn update_image_codec_tool(app: tauri::AppHandle, tool: String) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || update_image_codec_tool_blocking(app, &tool))
+        .await
+        .map_err(|err| format!("Image codec tool update task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn delete_image_codec_tool(tool: String) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_image_codec_tool_blocking(&tool))
+        .await
+        .map_err(|err| format!("Image codec tool delete task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn update_imagemagick(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update_image_codec_tool_blocking(app, "imagemagick")
+    })
+    .await
+    .map_err(|err| format!("ImageMagick update task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn delete_imagemagick() -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_image_codec_tool_blocking("imagemagick"))
+        .await
+        .map_err(|err| format!("ImageMagick delete task failed: {err}"))?
+}
+
+fn update_image_codec_tool_blocking(
+    app: tauri::AppHandle,
+    tool: &str,
+) -> Result<JobResult, String> {
+    let spec = image_codec_tool_spec(tool).ok_or("Unknown image codec tool.")?;
+    let root = workspace_root();
+    let tools_dir = root.join("tools");
+    let temp_dir = root.join("temp").join("tool_downloads");
+    fs::create_dir_all(&tools_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let stage = format!("Update {}", spec.label);
+
+    let asset = if let Some(url) = spec.direct_asset_url {
+        let name = url
+            .rsplit('/')
+            .next()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("tool.zip")
+            .to_string();
+        emit_progress(
+            &app,
+            &stage,
+            format!("Using official {} package...", spec.repo),
+        );
+        ReleaseAsset {
+            name,
+            url: url.to_string(),
+        }
+    } else {
+        emit_progress(&app, &stage, format!("Checking {} releases...", spec.repo));
+        latest_github_asset_ext(spec.repo, spec.asset_terms, spec.asset_extension)?
+    };
+    let archive_path = temp_dir.join(&asset.name);
+    emit_progress(&app, &stage, format!("Downloading {}...", asset.name));
+    download_with_progress(&app, &stage, &asset.url, &archive_path)?;
+
+    let extract_dir =
+        root.join("temp")
+            .join(format!("tool_extract_{}_{}", spec.key, timestamp_id()));
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir).map_err(|err| err.to_string())?;
+    }
+    fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
+    emit_progress(&app, &stage, "Extracting package...".to_string());
+    extract_archive(&archive_path, &extract_dir)?;
+
+    let required_paths = spec
+        .required_executables
+        .iter()
+        .map(|name| {
+            find_file_by_name(&extract_dir, name)
+                .ok_or_else(|| format!("Downloaded package did not contain {name}."))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let package_bin_dir = common_parent_dir(&required_paths).unwrap_or(&extract_dir);
+    let staged_dir = root
+        .join("temp")
+        .join(format!("tool_stage_{}_{}", spec.key, timestamp_id()));
+    if staged_dir.exists() {
+        fs::remove_dir_all(&staged_dir).map_err(|err| err.to_string())?;
+    }
+    copy_dir_all(package_bin_dir, &staged_dir)?;
+
+    for executable in spec.required_executables {
+        let executable_path = staged_dir.join(executable);
+        if !executable_path.exists() {
+            return Err(format!(
+                "Staged {} did not include {} at the expected location.",
+                spec.label, executable
+            ));
+        }
+        let mut validation = Command::new(&executable_path);
+        validation.arg(spec.validation_arg);
+        if spec.key == "imagemagick" {
+            configure_imagemagick_command(&mut validation, &executable_path);
+        }
+        let output = validation
+            .output()
+            .map_err(|err| format!("Failed to validate {executable}: {err}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let details = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("exit status {}", output.status)
+            };
+            return Err(format!(
+                "Downloaded {executable} failed validation: {details}"
+            ));
+        }
+    }
+
+    let managed_dir = tools_dir.join(spec.key);
+    let backup_dir = root
+        .join("temp")
+        .join(format!("tool_backup_{}_{}", spec.key, timestamp_id()));
+    if managed_dir.exists() {
+        fs::rename(&managed_dir, &backup_dir).map_err(|err| err.to_string())?;
+    }
+    match fs::rename(&staged_dir, &managed_dir) {
+        Ok(()) => {
+            if backup_dir.exists() {
+                fs::remove_dir_all(&backup_dir).ok();
+            }
+            fs::remove_dir_all(&extract_dir).ok();
+            emit_progress(&app, &stage, format!("Installed {}.", spec.label));
+            Ok(JobResult {
+                output_path: managed_dir.to_string_lossy().to_string(),
+                log: format!("Installed {} from {}.", asset.name, spec.repo),
+            })
+        }
+        Err(error) => {
+            if backup_dir.exists() && !managed_dir.exists() {
+                let _ = fs::rename(&backup_dir, &managed_dir);
+            }
+            Err(format!("Failed to activate {}: {error}", spec.label))
+        }
+    }
+}
+
+fn delete_image_codec_tool_blocking(tool: &str) -> Result<JobResult, String> {
+    let spec = image_codec_tool_spec(tool).ok_or("Unknown image codec tool.")?;
+    let tool_dir = workspace_root().join("tools").join(spec.key);
+    if tool_dir.exists() {
+        fs::remove_dir_all(&tool_dir)
+            .map_err(|err| format!("Failed to remove {}: {err}", tool_dir.display()))?;
+    }
+    Ok(JobResult {
+        output_path: tool_dir.to_string_lossy().to_string(),
+        log: format!("Removed {} from {}", spec.label, tool_dir.display()),
+    })
+}
+
+#[tauri::command]
 async fn compare_realesrgan_models(
     app: tauri::AppHandle,
     path: String,
@@ -1387,13 +2891,12 @@ fn run_upscale_job_blocking(
         return Err("Input video does not exist.".into());
     }
 
-    let output_folder = PathBuf::from(&options.output_folder);
-    fs::create_dir_all(&output_folder).map_err(|err| err.to_string())?;
     let mut output_name = options.output_name.trim().to_string();
     if Path::new(&output_name).extension().is_none() {
         output_name.push_str(".mp4");
     }
-    let output_path = output_folder.join(output_name);
+    let output_name = safe_output_filename(&output_name, "upscaled.mp4");
+    let output_path = output_dir_for(OutputKind::Video)?.join(output_name);
     let temp_dir = workspace_root()
         .join("temp")
         .join("jobs")
@@ -1403,10 +2906,12 @@ fn run_upscale_job_blocking(
     fs::create_dir_all(&frames_dir).map_err(|err| err.to_string())?;
     fs::create_dir_all(&upscaled_dir).map_err(|err| err.to_string())?;
 
-    emit_progress(
+    emit_progress_detail(
         &app,
         "Preparing",
         format!("Temp files: {}", temp_dir.display()),
+        Some(2.0),
+        Some("Preparing workspace"),
     );
     let mut full_log = String::new();
 
@@ -1415,19 +2920,22 @@ fn run_upscale_job_blocking(
     extract.arg("-hide_banner").arg("-y");
     add_trim_args(&mut extract, options.trim_start, options.trim_end);
     extract.arg("-i").arg(&input_path).arg(&input_pattern);
-    run_stage(
+    run_stage_progress(
         &app,
         "Extract frames",
         &mut extract,
         None,
         None,
         &mut full_log,
+        JobProgressRange::new(5.0, 15.0, "Extracting frames"),
     )?;
     let extracted_frames = count_files_with_extension(&frames_dir, "png")?;
-    emit_progress(
+    emit_progress_detail(
         &app,
         "Extract frames",
         format!("Prepared {extracted_frames} frames"),
+        Some(15.0),
+        Some("Extracting frames"),
     );
 
     let scale = realesrgan_model_scale(&options.model);
@@ -1454,13 +2962,14 @@ fn run_upscale_job_blocking(
     {
         upscale.arg("-g").arg(device);
     }
-    run_stage(
+    run_stage_progress(
         &app,
         "Upscale frames",
         &mut upscale,
         Some(executable_parent(&realesrgan)?),
         Some(extracted_frames),
         &mut full_log,
+        JobProgressRange::new(15.0, 88.0, "Upscaling frames"),
     )?;
 
     let upscaled_pattern = upscaled_dir.join("frame_%08d.png");
@@ -1484,19 +2993,181 @@ fn run_upscale_job_blocking(
         .arg(default_if_empty(&options.encoder_preset, "medium"))
         .args(["-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest"])
         .arg(&output_path);
-    run_stage(
+    run_stage_progress(
         &app,
         "Reassemble video",
         &mut assemble,
         None,
         None,
         &mut full_log,
+        JobProgressRange::new(88.0, 98.0, "Reassembling video"),
     )?;
 
     if output_path.exists() {
         fs::remove_dir_all(&temp_dir).ok();
     }
-    emit_progress(&app, "Done", format!("Output: {}", output_path.display()));
+    emit_progress_detail(
+        &app,
+        "Done",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn run_supir_image_job(
+    app: tauri::AppHandle,
+    options: SupirImageOptions,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_supir_image_job_blocking(app, options))
+        .await
+        .map_err(|err| format!("SUPIR image task failed: {err}"))?
+}
+
+fn run_supir_image_job_blocking(
+    app: tauri::AppHandle,
+    options: SupirImageOptions,
+) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
+    let conda = find_tool("conda").ok_or("Conda was not found in PATH.")?;
+    if !supir_repo_ready() {
+        return Err("SUPIR is not installed. Install it from Image settings first.".into());
+    }
+    if !conda_named_env_ready(&conda, SUPIR_ENV_NAME) {
+        return Err(format!("SUPIR Conda env {SUPIR_ENV_NAME} is not ready."));
+    }
+    let spec = supir_model_spec(&options.model)
+        .ok_or_else(|| format!("Unknown SUPIR model: {}", options.model))?;
+    let sdxl_path = supir_sdxl_checkpoint_path();
+    let supir_path = supir_checkpoint_dir().join(spec.file_name);
+    if !sdxl_path.exists() {
+        return Err(format!(
+            "SUPIR needs SDXL checkpoint at {}.",
+            sdxl_path.display()
+        ));
+    }
+    if !supir_path.exists() {
+        return Err(format!(
+            "SUPIR model checkpoint is missing: {}",
+            supir_path.display()
+        ));
+    }
+
+    let input_path = PathBuf::from(&options.input_path);
+    if !input_path.exists() {
+        return Err("Input image does not exist.".into());
+    }
+    write_supir_runtime_files()?;
+
+    let output_folder = output_dir_for(OutputKind::Image)?;
+    let output_name = output_image_name(&options.output_name, &input_path, "supir");
+    let output_path = output_folder.join(output_name);
+
+    let temp_dir = PathBuf::from(get_app_settings()?.temp_folder)
+        .join("jobs")
+        .join(format!("supir_{}", timestamp_id()));
+    let input_dir = temp_dir.join("input");
+    let result_dir = temp_dir.join("result");
+    fs::create_dir_all(&input_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(&result_dir).map_err(|err| err.to_string())?;
+    let temp_input = input_dir.join(
+        input_path
+            .file_name()
+            .ok_or("Input image path has no file name.")?,
+    );
+    fs::copy(&input_path, &temp_input).map_err(|err| err.to_string())?;
+
+    emit_progress_detail(
+        &app,
+        "SUPIR",
+        format!("Temp files: {}", temp_dir.display()),
+        Some(5.0),
+        Some("Preparing workspace"),
+    );
+    let mut full_log = String::new();
+    let preset = supir_preset(&options.preset);
+    let mut command = Command::new(&conda);
+    command
+        .args([
+            "run",
+            "--no-capture-output",
+            "-n",
+            SUPIR_ENV_NAME,
+            "python",
+            "test.py",
+            "--img_dir",
+        ])
+        .arg(&input_dir)
+        .arg("--save_dir")
+        .arg(&result_dir)
+        .arg("--SUPIR_sign")
+        .arg(spec.sign)
+        .arg("--upscale")
+        .arg(default_if_empty(&options.upscale, "2"))
+        .arg("--edm_steps")
+        .arg(preset.edm_steps)
+        .arg("--s_cfg")
+        .arg(preset.s_cfg)
+        .arg("--s_stage2")
+        .arg(preset.s_stage2)
+        .arg("--spt_linear_CFG")
+        .arg(preset.spt_linear_cfg)
+        .arg("--s_noise")
+        .arg(preset.s_noise)
+        .arg("--color_fix_type")
+        .arg("Wavelet");
+    if !options.use_llava {
+        command.arg("--no_llava");
+    }
+    if preset.low_vram {
+        command
+            .arg("--loading_half_params")
+            .arg("--use_tile_vae")
+            .arg("--load_8bit_llava");
+    }
+    if let Some(device) = options
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.env("CUDA_VISIBLE_DEVICES", device);
+    }
+
+    run_stage_with_heartbeat(
+        &app,
+        "SUPIR restore",
+        &mut command,
+        Some(supir_repo_dir()),
+        None,
+        &mut full_log,
+        Some(Duration::from_secs(15)),
+        Some(JobProgressRange::new(10.0, 95.0, "Restoring image")),
+    )?;
+
+    let result_path = find_first_file_with_extension(&result_dir, "png")
+        .ok_or("SUPIR did not produce a PNG output.")?;
+    emit_progress_detail(
+        &app,
+        "SUPIR",
+        "Saving output image.".to_string(),
+        Some(98.0),
+        Some("Saving output"),
+    );
+    fs::copy(&result_path, &output_path).map_err(|err| err.to_string())?;
+    fs::remove_dir_all(&temp_dir).ok();
+    emit_progress_detail(
+        &app,
+        "SUPIR",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
         log: full_log,
@@ -1519,13 +3190,12 @@ fn run_rife_job_blocking(app: tauri::AppHandle, options: RifeOptions) -> Result<
         return Err("Input video does not exist.".into());
     }
 
-    let output_folder = PathBuf::from(&options.output_folder);
-    fs::create_dir_all(&output_folder).map_err(|err| err.to_string())?;
     let mut output_name = options.output_name.trim().to_string();
     if Path::new(&output_name).extension().is_none() {
         output_name.push_str(".mp4");
     }
-    let output_path = output_folder.join(output_name);
+    let output_name = safe_output_filename(&output_name, "rife.mp4");
+    let output_path = output_dir_for(OutputKind::Video)?.join(output_name);
     let temp_dir = workspace_root()
         .join("temp")
         .join("jobs")
@@ -1533,10 +3203,12 @@ fn run_rife_job_blocking(app: tauri::AppHandle, options: RifeOptions) -> Result<
     let frames_dir = temp_dir.join("frames");
     fs::create_dir_all(&frames_dir).map_err(|err| err.to_string())?;
 
-    emit_progress(
+    emit_progress_detail(
         &app,
         "Preparing",
         format!("Temp files: {}", temp_dir.display()),
+        Some(2.0),
+        Some("Preparing workspace"),
     );
     let mut full_log = String::new();
 
@@ -1545,22 +3217,25 @@ fn run_rife_job_blocking(app: tauri::AppHandle, options: RifeOptions) -> Result<
     extract.arg("-hide_banner").arg("-y");
     add_trim_args(&mut extract, options.trim_start, options.trim_end);
     extract.arg("-i").arg(&input_path).arg(&input_pattern);
-    run_stage(
+    run_stage_progress(
         &app,
         "Extract frames",
         &mut extract,
         None,
         None,
         &mut full_log,
+        JobProgressRange::new(5.0, 15.0, "Extracting frames"),
     )?;
     let extracted_frames = count_files_with_extension(&frames_dir, "png")?;
     if extracted_frames < 2 {
         return Err("RIFE needs at least two frames to interpolate.".into());
     }
-    emit_progress(
+    emit_progress_detail(
         &app,
         "Extract frames",
         format!("Prepared {extracted_frames} frames"),
+        Some(15.0),
+        Some("Extracting frames"),
     );
 
     let multiplier = options.multiplier.clamp(2, 8);
@@ -1601,20 +3276,25 @@ fn run_rife_job_blocking(app: tauri::AppHandle, options: RifeOptions) -> Result<
         if options.uhd {
             interpolate.arg("-u");
         }
-        run_stage(
+        let pass_start = 15.0 + (75.0 * (pass - 1) as f64 / passes as f64);
+        let pass_end = 15.0 + (75.0 * pass as f64 / passes as f64);
+        run_stage_progress(
             &app,
             &format!("Interpolate frames {pass}/{passes}"),
             &mut interpolate,
             Some(executable_parent(&rife)?),
             Some(target_frames),
             &mut full_log,
+            JobProgressRange::new(pass_start, pass_end, "Interpolating frames"),
         )?;
         source_dir = pass_dir;
         source_count = count_files_with_extension(&source_dir, "png")?;
-        emit_progress(
+        emit_progress_detail(
             &app,
             "Interpolate frames",
             format!("Pass {pass}/{passes} produced {source_count} frames"),
+            Some(pass_end),
+            Some("Interpolating frames"),
         );
     }
 
@@ -1637,19 +3317,26 @@ fn run_rife_job_blocking(app: tauri::AppHandle, options: RifeOptions) -> Result<
         .arg(default_if_empty(&options.encoder_preset, "medium"))
         .args(["-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest"])
         .arg(&output_path);
-    run_stage(
+    run_stage_progress(
         &app,
         "Reassemble video",
         &mut assemble,
         None,
         None,
         &mut full_log,
+        JobProgressRange::new(90.0, 98.0, "Reassembling video"),
     )?;
 
     if output_path.exists() {
         fs::remove_dir_all(&temp_dir).ok();
     }
-    emit_progress(&app, "Done", format!("Output: {}", output_path.display()));
+    emit_progress_detail(
+        &app,
+        "Done",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
         log: full_log,
@@ -1694,13 +3381,12 @@ fn run_facefusion_job_blocking(
         return Err("Source face image does not exist.".into());
     }
 
-    let output_folder = PathBuf::from(&options.output_folder);
-    fs::create_dir_all(&output_folder).map_err(|err| err.to_string())?;
     let mut output_name = options.output_name.trim().to_string();
     if Path::new(&output_name).extension().is_none() {
         output_name.push_str(".mp4");
     }
-    let output_path = output_folder.join(output_name);
+    let output_name = safe_output_filename(&output_name, "facefusion.mp4");
+    let output_path = output_dir_for(OutputKind::Video)?.join(output_name);
     if output_path.exists() {
         fs::remove_file(&output_path).map_err(|err| err.to_string())?;
     }
@@ -1722,13 +3408,14 @@ fn run_facefusion_job_blocking(
             .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k"])
             .arg(&trimmed_target);
         let mut full_log = String::new();
-        run_stage(
+        run_stage_progress(
             &app,
             "FaceFusion trim",
             &mut trim,
             None,
             None,
             &mut full_log,
+            JobProgressRange::new(5.0, 20.0, "Preparing target"),
         )?;
         trimmed_target
     } else {
@@ -1738,10 +3425,16 @@ fn run_facefusion_job_blocking(
     let processors = facefusion_processors(&options.processor_preset);
     let provider = facefusion_provider(&options.execution_provider);
     let mut full_log = String::new();
-    emit_progress(
+    emit_progress_detail(
         &app,
         "FaceFusion",
         format!("Running {} with {provider}.", options.processor_preset),
+        Some(if target_path == input_path {
+            10.0
+        } else {
+            20.0
+        }),
+        Some("Running FaceFusion"),
     );
 
     let mut runtime_paths = Vec::new();
@@ -1784,22 +3477,33 @@ fn run_facefusion_job_blocking(
         }
     }
     prepend_paths_env(&mut command, &runtime_paths);
-    run_stage(
+    run_stage_progress(
         &app,
         "FaceFusion",
         &mut command,
         Some(repo_dir),
         None,
         &mut full_log,
+        JobProgressRange::new(
+            if target_path == input_path {
+                10.0
+            } else {
+                20.0
+            },
+            95.0,
+            "Running FaceFusion",
+        ),
     )?;
 
     if output_path.exists() {
         fs::remove_dir_all(&temp_dir).ok();
     }
-    emit_progress(
+    emit_progress_detail(
         &app,
         "FaceFusion",
         format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
     );
     Ok(JobResult {
         output_path: output_path.to_string_lossy().to_string(),
@@ -1808,13 +3512,47 @@ fn run_facefusion_job_blocking(
 }
 
 fn emit_progress(app: &tauri::AppHandle, stage: &str, message: String) {
+    emit_progress_value(app, stage, message, None);
+}
+
+fn emit_progress_value(
+    app: &tauri::AppHandle,
+    stage: &str,
+    message: String,
+    progress: Option<f64>,
+) {
+    emit_progress_detail(app, stage, message, progress, None);
+}
+
+fn emit_progress_detail(
+    app: &tauri::AppHandle,
+    stage: &str,
+    message: String,
+    progress: Option<f64>,
+    step: Option<&str>,
+) {
     let _ = app.emit(
         "upscale-progress",
         ProgressEvent {
             stage: stage.to_string(),
             message,
+            progress: progress.map(|value| value.clamp(0.0, 100.0)),
+            step: step.map(str::to_string),
         },
     );
+}
+
+#[derive(Clone, Copy)]
+struct JobProgressRange {
+    start: f64,
+    end: f64,
+    step: &'static str,
+}
+
+impl JobProgressRange {
+    fn new(start: f64, end: f64, step: &'static str) -> Self {
+        Self { start, end, step }
+    }
 }
 
 fn run_stage(
@@ -1825,11 +3563,64 @@ fn run_stage(
     frame_total: Option<usize>,
     full_log: &mut String,
 ) -> Result<(), String> {
+    run_stage_with_heartbeat(
+        app,
+        stage,
+        command,
+        current_dir,
+        frame_total,
+        full_log,
+        None,
+        None,
+    )
+}
+
+fn run_stage_progress(
+    app: &tauri::AppHandle,
+    stage: &str,
+    command: &mut Command,
+    current_dir: Option<PathBuf>,
+    frame_total: Option<usize>,
+    full_log: &mut String,
+    progress: JobProgressRange,
+) -> Result<(), String> {
+    run_stage_with_heartbeat(
+        app,
+        stage,
+        command,
+        current_dir,
+        frame_total,
+        full_log,
+        None,
+        Some(progress),
+    )
+}
+
+fn run_stage_with_heartbeat(
+    app: &tauri::AppHandle,
+    stage: &str,
+    command: &mut Command,
+    current_dir: Option<PathBuf>,
+    frame_total: Option<usize>,
+    full_log: &mut String,
+    heartbeat_interval: Option<Duration>,
+    progress_range: Option<JobProgressRange>,
+) -> Result<(), String> {
     if let Some(dir) = current_dir {
         command.current_dir(dir);
     }
 
-    emit_progress(app, stage, "Started".to_string());
+    if let Some(range) = progress_range {
+        emit_progress_detail(
+            app,
+            stage,
+            "Started".to_string(),
+            Some(range.start),
+            Some(range.step),
+        );
+    } else {
+        emit_progress(app, stage, "Started".to_string());
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
@@ -1838,7 +3629,7 @@ fn run_stage(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (sender, receiver) = mpsc::channel::<String>();
-    let mut frame_progress = frame_total.map(FrameProgress::new);
+    let _frame_total = frame_total;
 
     if let Some(stream) = stdout {
         stream_lines(stream, sender.clone());
@@ -1848,19 +3639,35 @@ fn run_stage(
     }
     drop(sender);
 
+    let started_at = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    let mut last_output_at = Instant::now();
     loop {
         while let Ok(line) = receiver.try_recv() {
             if !line.trim().is_empty() {
+                last_output_at = Instant::now();
                 full_log.push_str(&line);
                 full_log.push('\n');
-                emit_progress(app, stage, format_stage_line(line, &mut frame_progress));
+                emit_progress_detail(
+                    app,
+                    stage,
+                    line,
+                    None,
+                    progress_range.map(|range| range.step),
+                );
             }
         }
 
         if CANCEL_UPSCALE.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            emit_progress(app, stage, "Cancelled".to_string());
+            emit_progress_detail(
+                app,
+                stage,
+                "Cancelled".to_string(),
+                Some(0.0),
+                Some("Cancelled"),
+            );
             return Err("Upscale job cancelled.".into());
         }
 
@@ -1872,12 +3679,28 @@ fn run_stage(
                 if !line.trim().is_empty() {
                     full_log.push_str(&line);
                     full_log.push('\n');
-                    emit_progress(app, stage, format_stage_line(line, &mut frame_progress));
+                    emit_progress_detail(
+                        app,
+                        stage,
+                        line,
+                        None,
+                        progress_range.map(|range| range.step),
+                    );
                 }
             }
 
             if status.success() {
-                emit_progress(app, stage, "Finished".to_string());
+                if let Some(range) = progress_range {
+                    emit_progress_detail(
+                        app,
+                        stage,
+                        "Finished".to_string(),
+                        Some(range.end),
+                        Some(range.step),
+                    );
+                } else {
+                    emit_progress(app, stage, "Finished".to_string());
+                }
                 return Ok(());
             }
 
@@ -1890,7 +3713,25 @@ fn run_stage(
             ));
         }
 
-        thread::sleep(std::time::Duration::from_millis(120));
+        if let Some(interval) = heartbeat_interval {
+            if last_heartbeat.elapsed() >= interval {
+                let elapsed = started_at.elapsed().as_secs();
+                let quiet = last_output_at.elapsed().as_secs();
+                let gpu_status = gpu_heartbeat_status()
+                    .map(|status| format!(" {status}"))
+                    .unwrap_or_default();
+                emit_progress_detail(
+                    app,
+                    stage,
+                    format!("Still running ({elapsed}s elapsed, {quiet}s since last output).{gpu_status}"),
+                    None,
+                    progress_range.map(|range| range.step),
+                );
+                last_heartbeat = Instant::now();
+            }
+        }
+
+        thread::sleep(Duration::from_millis(120));
     }
 }
 
@@ -1901,6 +3742,41 @@ fn stream_lines<R: Read + Send + 'static>(stream: R, sender: mpsc::Sender<String
             let _ = sender.send(line);
         }
     });
+}
+
+fn gpu_heartbeat_status() -> Option<String> {
+    let nvidia_smi = find_tool("nvidia-smi").unwrap_or_else(|| "nvidia-smi".to_string());
+    let output = Command::new(nvidia_smi)
+        .args([
+            "--query-gpu=index,name,utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let columns = line
+            .split(',')
+            .map(|column| column.trim())
+            .collect::<Vec<_>>();
+        if columns.len() < 5 {
+            continue;
+        }
+        parts.push(format!(
+            "GPU {} {}: {}% util, {}/{} MiB VRAM",
+            columns[0], columns[1], columns[2], columns[3], columns[4]
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
 }
 
 fn install_github_release_tool(
@@ -1976,6 +3852,81 @@ struct ReleaseAsset {
     url: String,
 }
 
+struct ImageCodecToolSpec {
+    key: &'static str,
+    label: &'static str,
+    repo: &'static str,
+    asset_terms: &'static [&'static str],
+    asset_extension: &'static str,
+    direct_asset_url: Option<&'static str>,
+    required_executables: &'static [&'static str],
+    validation_arg: &'static str,
+}
+
+fn image_codec_tool_spec(tool: &str) -> Option<ImageCodecToolSpec> {
+    match tool.trim().to_lowercase().as_str() {
+        "oxipng" => Some(ImageCodecToolSpec {
+            key: "oxipng",
+            label: "OxiPNG",
+            repo: "oxipng/oxipng",
+            asset_terms: &["x86_64", "windows", "msvc"],
+            asset_extension: ".zip",
+            direct_asset_url: None,
+            required_executables: &["oxipng.exe"],
+            validation_arg: "--version",
+        }),
+        "libavif" => Some(ImageCodecToolSpec {
+            key: "libavif",
+            label: "libavif",
+            repo: "AOMediaCodec/libavif",
+            asset_terms: &["windows"],
+            asset_extension: ".zip",
+            direct_asset_url: None,
+            required_executables: &["avifenc.exe", "avifdec.exe"],
+            validation_arg: "--version",
+        }),
+        "libwebp" => Some(ImageCodecToolSpec {
+            key: "libwebp",
+            label: "libwebp",
+            repo: "Google WebP precompiled utilities",
+            asset_terms: &[],
+            asset_extension: ".zip",
+            direct_asset_url: Some("https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0-windows-x64.zip"),
+            required_executables: &["cwebp.exe", "dwebp.exe"],
+            validation_arg: "-version",
+        }),
+        "mozjpeg" => Some(ImageCodecToolSpec {
+            key: "mozjpeg",
+            label: "MozJPEG",
+            repo: "mozilla/mozjpeg",
+            asset_terms: &["win", "x64"],
+            asset_extension: ".zip",
+            direct_asset_url: None,
+            required_executables: &["cjpeg.exe", "jpegtran.exe"],
+            validation_arg: "-version",
+        }),
+        "imagemagick" => Some(ImageCodecToolSpec {
+            key: "imagemagick",
+            label: "ImageMagick",
+            repo: "ImageMagick/ImageMagick",
+            asset_terms: &["portable-q16-x64"],
+            asset_extension: ".7z",
+            direct_asset_url: None,
+            required_executables: &["magick.exe"],
+            validation_arg: "-version",
+        }),
+        _ => None,
+    }
+}
+
+fn common_parent_dir(paths: &[PathBuf]) -> Option<&Path> {
+    let first = paths.first()?.parent()?;
+    paths
+        .iter()
+        .all(|path| path.parent().is_some_and(|parent| parent == first))
+        .then_some(first)
+}
+
 fn latest_github_asset(repo: &str, terms: &[&str]) -> Result<ReleaseAsset, String> {
     latest_github_asset_ext(repo, terms, ".zip")
 }
@@ -2026,6 +3977,39 @@ fn latest_github_asset_ext(
     Err(format!("No matching Windows asset was found for {repo}."))
 }
 
+fn extract_archive(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    let extension = archive_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if extension == "zip" {
+        return unzip_archive(archive_path, destination);
+    }
+
+    let output = Command::new("tar")
+        .arg("-xf")
+        .arg(archive_path)
+        .arg("-C")
+        .arg(destination)
+        .output()
+        .map_err(|err| {
+            format!(
+                "Failed to extract {} with tar: {err}",
+                archive_path.display()
+            )
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to extract {}: {}",
+            archive_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
 fn download_with_progress(
     app: &tauri::AppHandle,
     stage: &str,
@@ -2061,23 +4045,30 @@ fn download_with_progress(
         let downloaded_mb = downloaded / 1_048_576;
         if downloaded_mb >= last_reported_mb + 5 {
             last_reported_mb = downloaded_mb;
-            let message = if let Some(total) = total {
-                format!(
-                    "Downloaded {:.1} / {:.1} MB",
-                    downloaded as f64 / 1_048_576.0,
-                    total as f64 / 1_048_576.0
+            let (message, progress) = if let Some(total) = total {
+                (
+                    format!(
+                        "Downloaded {:.1} / {:.1} MB",
+                        downloaded as f64 / 1_048_576.0,
+                        total as f64 / 1_048_576.0
+                    ),
+                    Some((downloaded as f64 / total as f64) * 100.0),
                 )
             } else {
-                format!("Downloaded {:.1} MB", downloaded as f64 / 1_048_576.0)
+                (
+                    format!("Downloaded {:.1} MB", downloaded as f64 / 1_048_576.0),
+                    None,
+                )
             };
-            emit_progress(app, stage, message);
+            emit_progress_value(app, stage, message, progress);
         }
     }
 
-    emit_progress(
+    emit_progress_value(
         app,
         stage,
         format!("Downloaded {:.1} MB", downloaded as f64 / 1_048_576.0),
+        Some(100.0),
     );
     Ok(())
 }
@@ -2102,53 +4093,6 @@ fn unzip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-struct FrameProgress {
-    current: usize,
-    total: usize,
-    last_percent: f64,
-}
-
-impl FrameProgress {
-    fn new(total: usize) -> Self {
-        Self {
-            current: 1,
-            total: total.max(1),
-            last_percent: 0.0,
-        }
-    }
-}
-
-fn format_stage_line(line: String, progress: &mut Option<FrameProgress>) -> String {
-    let trimmed = line.trim();
-    let Some(value) = trimmed
-        .strip_suffix('%')
-        .and_then(|percent| percent.parse::<f64>().ok())
-    else {
-        return line;
-    };
-
-    let Some(progress) = progress else {
-        return line;
-    };
-
-    if value < progress.last_percent && progress.current < progress.total {
-        progress.current += 1;
-    }
-    progress.last_percent = value;
-    format!(
-        "frame [{}/{}] - {} {:.1}%",
-        progress.current,
-        progress.total,
-        text_progress_bar(value),
-        value
-    )
-}
-
-fn text_progress_bar(percent: f64) -> String {
-    let filled = (percent / 10.0).round().clamp(0.0, 10.0) as usize;
-    format!("{}{}", "▓".repeat(filled), "▒".repeat(10 - filled))
 }
 
 fn app_settings_path() -> PathBuf {
@@ -2187,7 +4131,7 @@ fn social_output_name(name: &str, format: &str) -> String {
     let stem = default_if_empty(name, "social_export");
     let desired = extension.trim_start_matches('.');
     let path = Path::new(stem);
-    if path
+    let candidate = if path
         .extension()
         .and_then(|value| value.to_str())
         .is_some_and(|value| value.eq_ignore_ascii_case(desired))
@@ -2199,7 +4143,586 @@ fn social_output_name(name: &str, format: &str) -> String {
             .and_then(|value| value.to_str())
             .unwrap_or(stem);
         format!("{clean_stem}{extension}")
+    };
+    safe_output_filename(&candidate, &format!("social_export{extension}"))
+}
+
+fn normalized_image_compress_format(format: &str) -> &'static str {
+    match format.trim().to_lowercase().as_str() {
+        "png" => "png",
+        "jpg" | "jpeg" => "jpg",
+        "webp" => "webp",
+        "avif" => "avif",
+        "gif" => "gif",
+        "apng" => "apng",
+        _ => "webp",
     }
+}
+
+fn image_compress_output_name(name: &str, format: &str) -> String {
+    let extension = match format {
+        "jpg" => ".jpg",
+        "webp" => ".webp",
+        "avif" => ".avif",
+        "gif" => ".gif",
+        "apng" => ".apng",
+        _ => ".png",
+    };
+    let stem = default_if_empty(name, "image_compress");
+    let desired = extension.trim_start_matches('.');
+    let path = Path::new(stem);
+    let candidate = if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(desired))
+    {
+        stem.to_string()
+    } else {
+        let clean_stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(stem);
+        format!("{clean_stem}{extension}")
+    };
+    safe_output_filename(&candidate, &format!("image_compress{extension}"))
+}
+
+fn is_gif_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("gif"))
+}
+
+fn effort_oxipng(effort: &str) -> &'static str {
+    match effort {
+        "fast" => "2",
+        "smallest" => "6",
+        _ => "4",
+    }
+}
+
+fn effort_webp(effort: &str) -> &'static str {
+    match effort {
+        "fast" => "2",
+        "smallest" => "6",
+        _ => "4",
+    }
+}
+
+fn effort_avif(effort: &str) -> &'static str {
+    match effort {
+        "fast" => "8",
+        "smallest" => "4",
+        _ => "6",
+    }
+}
+
+fn ffmpeg_still_to(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    codec_format: &str,
+    full_log: &mut String,
+    range: JobProgressRange,
+) -> Result<(), String> {
+    let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(input_path)
+        .args(["-frames:v", "1", "-update", "1"]);
+    if codec_format == "ppm" {
+        command.args(["-f", "image2", "-c:v", "ppm"]);
+    }
+    command.arg(output_path);
+    run_stage_progress(
+        app,
+        "Image decode",
+        &mut command,
+        None,
+        None,
+        full_log,
+        range,
+    )
+}
+
+fn magick_still_to(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    format: &str,
+    quality: Option<u8>,
+    options: &ImageCompressOptions,
+    full_log: &mut String,
+    range: JobProgressRange,
+) -> Result<(), String> {
+    let magick = find_tool("magick")
+        .ok_or("ImageMagick was not found. Install ImageMagick from Must haves.")?;
+    let magick_path = PathBuf::from(&magick);
+    let mut command = Command::new(&magick_path);
+    configure_imagemagick_command(&mut command, &magick_path);
+    command.arg(input_path).arg("-auto-orient");
+    if !options.keep_metadata {
+        command.arg("-strip");
+    }
+    if options.lossless && matches!(format, "webp" | "avif") {
+        if format == "webp" {
+            command.args(["-define", "webp:lossless=true"]);
+        }
+    } else if let Some(value) = quality {
+        command.arg("-quality").arg(value.to_string());
+    }
+    if format == "png" && options.effort != "fast" {
+        command.args(["-define", "png:compression-level=9"]);
+    }
+    command.arg(output_path);
+    run_stage_progress(
+        app,
+        "ImageMagick",
+        &mut command,
+        None,
+        None,
+        full_log,
+        range,
+    )
+}
+
+fn configure_imagemagick_command(command: &mut Command, executable_path: &Path) {
+    if let Some(parent) = executable_path.parent() {
+        command.current_dir(parent).env("MAGICK_HOME", parent);
+    }
+}
+
+fn palette_color_count(options: &ImageCompressOptions) -> u16 {
+    let value = if options.palette_colors == 0 {
+        128
+    } else {
+        options.palette_colors
+    };
+    value.clamp(2, 256)
+}
+
+fn reduce_palette_still(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    temp_dir: &Path,
+    options: &ImageCompressOptions,
+    full_log: &mut String,
+) -> Result<PathBuf, String> {
+    let magick = find_tool("magick").ok_or(
+        "ImageMagick was not found. Install ImageMagick from Must haves to reduce palette.",
+    )?;
+    let output_path = temp_dir.join("palette_reduced.png");
+    let magick_path = PathBuf::from(&magick);
+    let colors = palette_color_count(options);
+    let mut command = Command::new(&magick_path);
+    configure_imagemagick_command(&mut command, &magick_path);
+    command.arg(input_path).arg("-auto-orient");
+    if !options.keep_metadata {
+        command.arg("-strip");
+    }
+    if options.palette_dither {
+        command.args(["-dither", "FloydSteinberg"]);
+    } else {
+        command.arg("+dither");
+    }
+    command
+        .arg("-colors")
+        .arg(colors.to_string())
+        .arg(&output_path);
+    run_stage_progress(
+        app,
+        "Palette reduction",
+        &mut command,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(8.0, 24.0, "Reducing palette"),
+    )?;
+    full_log.push_str(&format!(
+        "Palette reduced to up to {colors} colors{}.\n",
+        if options.palette_dither {
+            " with dithering"
+        } else {
+            ""
+        }
+    ));
+    Ok(output_path)
+}
+
+fn compress_to_png(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    _temp_dir: &Path,
+    options: &ImageCompressOptions,
+    full_log: &mut String,
+) -> Result<(), String> {
+    let oxipng = find_tool("oxipng");
+    if oxipng.is_none() {
+        full_log.push_str("OxiPNG is not installed. Using ImageMagick PNG compression.\n");
+        return magick_still_to(
+            app,
+            input_path,
+            output_path,
+            "png",
+            None,
+            options,
+            full_log,
+            JobProgressRange::new(10.0, 95.0, "Encoding PNG"),
+        );
+    }
+    ffmpeg_still_to(
+        app,
+        input_path,
+        output_path,
+        "png",
+        full_log,
+        JobProgressRange::new(10.0, 60.0, "Encoding PNG"),
+    )?;
+
+    let mut command = Command::new(oxipng.expect("checked oxipng"));
+    command.arg("-o").arg(effort_oxipng(&options.effort));
+    if !options.keep_metadata {
+        command.args(["--strip", "safe"]);
+    }
+    command.arg(output_path);
+    run_stage_progress(
+        app,
+        "OxiPNG",
+        &mut command,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(60.0, 95.0, "Optimizing PNG"),
+    )
+}
+
+fn compress_to_jpeg(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    temp_dir: &Path,
+    quality: u8,
+    options: &ImageCompressOptions,
+    full_log: &mut String,
+) -> Result<(), String> {
+    let cjpeg = find_tool("cjpeg");
+    if cjpeg.is_none() {
+        full_log.push_str("MozJPEG is not installed. Using ImageMagick JPEG compression.\n");
+        return magick_still_to(
+            app,
+            input_path,
+            output_path,
+            "jpg",
+            Some(quality),
+            options,
+            full_log,
+            JobProgressRange::new(10.0, 95.0, "Encoding JPEG"),
+        );
+    }
+    let ppm_path = temp_dir.join("source.ppm");
+    ffmpeg_still_to(
+        app,
+        input_path,
+        &ppm_path,
+        "ppm",
+        full_log,
+        JobProgressRange::new(10.0, 45.0, "Preparing JPEG input"),
+    )?;
+
+    let mut command = Command::new(cjpeg.expect("checked cjpeg"));
+    command.arg("-quality").arg(quality.to_string());
+    if options.effort != "fast" {
+        command.arg("-optimize").arg("-progressive");
+    }
+    command.arg("-outfile").arg(output_path).arg(&ppm_path);
+    run_stage_progress(
+        app,
+        "MozJPEG",
+        &mut command,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(45.0, 95.0, "Encoding JPEG"),
+    )
+}
+
+fn compress_to_webp(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    temp_dir: &Path,
+    quality: u8,
+    options: &ImageCompressOptions,
+    preserve_animation: bool,
+    full_log: &mut String,
+) -> Result<(), String> {
+    if preserve_animation {
+        let gif2webp = find_tool("gif2webp").ok_or(
+            "libwebp gif2webp.exe was not found. Install libwebp from Image editing settings.",
+        )?;
+        let mut command = Command::new(gif2webp);
+        if !options.lossless {
+            command.arg("-lossy");
+        }
+        command
+            .arg("-q")
+            .arg(quality.to_string())
+            .arg("-m")
+            .arg(effort_webp(&options.effort))
+            .arg(input_path)
+            .arg("-o")
+            .arg(output_path);
+        return run_stage_progress(
+            app,
+            "libwebp",
+            &mut command,
+            None,
+            None,
+            full_log,
+            JobProgressRange::new(10.0, 95.0, "Encoding animated WebP"),
+        );
+    }
+
+    let cwebp = find_tool("cwebp");
+    if cwebp.is_none() {
+        full_log.push_str("libwebp is not installed. Using ImageMagick WebP compression.\n");
+        return magick_still_to(
+            app,
+            input_path,
+            output_path,
+            "webp",
+            Some(quality),
+            options,
+            full_log,
+            JobProgressRange::new(10.0, 95.0, "Encoding WebP"),
+        );
+    }
+    let png_path = temp_dir.join("source.png");
+    ffmpeg_still_to(
+        app,
+        input_path,
+        &png_path,
+        "png",
+        full_log,
+        JobProgressRange::new(10.0, 45.0, "Preparing WebP input"),
+    )?;
+
+    let mut command = Command::new(cwebp.expect("checked cwebp"));
+    if options.lossless {
+        command.arg("-lossless");
+    }
+    command
+        .arg("-q")
+        .arg(quality.to_string())
+        .arg("-m")
+        .arg(effort_webp(&options.effort))
+        .arg(&png_path)
+        .arg("-o")
+        .arg(output_path);
+    run_stage_progress(
+        app,
+        "libwebp",
+        &mut command,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(45.0, 95.0, "Encoding WebP"),
+    )
+}
+
+fn compress_to_avif(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    temp_dir: &Path,
+    quality: u8,
+    options: &ImageCompressOptions,
+    full_log: &mut String,
+) -> Result<(), String> {
+    let avifenc = find_tool("avifenc");
+    if avifenc.is_none() {
+        full_log.push_str("libavif is not installed. Using ImageMagick AVIF compression.\n");
+        return magick_still_to(
+            app,
+            input_path,
+            output_path,
+            "avif",
+            Some(quality),
+            options,
+            full_log,
+            JobProgressRange::new(10.0, 95.0, "Encoding AVIF"),
+        );
+    }
+    let png_path = temp_dir.join("source.png");
+    ffmpeg_still_to(
+        app,
+        input_path,
+        &png_path,
+        "png",
+        full_log,
+        JobProgressRange::new(10.0, 45.0, "Preparing AVIF input"),
+    )?;
+
+    let mut command = Command::new(avifenc.expect("checked avifenc"));
+    if options.lossless {
+        command.arg("--lossless");
+    } else {
+        command.arg("-q").arg(quality.to_string());
+    }
+    command
+        .arg("-s")
+        .arg(effort_avif(&options.effort))
+        .arg(&png_path)
+        .arg(output_path);
+    run_stage_progress(
+        app,
+        "libavif",
+        &mut command,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(45.0, 95.0, "Encoding AVIF"),
+    )
+}
+
+fn compress_to_gif(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    temp_dir: &Path,
+    quality: u8,
+    preserve_animation: bool,
+    options: &ImageCompressOptions,
+    full_log: &mut String,
+) -> Result<(), String> {
+    let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+    if preserve_animation {
+        let palette_path = temp_dir.join("palette.png");
+        let max_colors = if options.reduce_palette {
+            palette_color_count(options)
+        } else {
+            ((quality as f64 / 100.0) * 224.0 + 32.0)
+                .round()
+                .clamp(32.0, 256.0) as u16
+        };
+        let mut palette = Command::new(&ffmpeg);
+        palette
+            .arg("-hide_banner")
+            .arg("-y")
+            .arg("-i")
+            .arg(input_path)
+            .arg("-vf")
+            .arg(format!("palettegen=max_colors={max_colors}"))
+            .arg(&palette_path);
+        run_stage_progress(
+            app,
+            "GIF palette",
+            &mut palette,
+            None,
+            None,
+            full_log,
+            JobProgressRange::new(10.0, 35.0, "Generating GIF palette"),
+        )?;
+
+        let mut gif = Command::new(ffmpeg);
+        gif.arg("-hide_banner")
+            .arg("-y")
+            .arg("-i")
+            .arg(input_path)
+            .arg("-i")
+            .arg(&palette_path)
+            .arg("-lavfi")
+            .arg(if options.palette_dither {
+                "[0:v][1:v]paletteuse=dither=sierra2_4a"
+            } else {
+                "[0:v][1:v]paletteuse=dither=none"
+            })
+            .arg("-loop")
+            .arg("0")
+            .arg(output_path);
+        return run_stage_progress(
+            app,
+            "GIF export",
+            &mut gif,
+            None,
+            None,
+            full_log,
+            JobProgressRange::new(35.0, 95.0, "Encoding GIF"),
+        );
+    }
+
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(input_path)
+        .args(["-frames:v", "1"])
+        .arg(output_path);
+    run_stage_progress(
+        app,
+        "GIF export",
+        &mut command,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(10.0, 95.0, "Encoding GIF"),
+    )
+}
+
+fn compress_to_apng(
+    app: &tauri::AppHandle,
+    input_path: &Path,
+    output_path: &Path,
+    _temp_dir: &Path,
+    preserve_animation: bool,
+    options: &ImageCompressOptions,
+    full_log: &mut String,
+) -> Result<(), String> {
+    let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+    let oxipng = find_tool("oxipng")
+        .ok_or("OxiPNG was not found. Install OxiPNG from Image editing settings.")?;
+    let mut command = Command::new(ffmpeg);
+    command
+        .arg("-hide_banner")
+        .arg("-y")
+        .arg("-i")
+        .arg(input_path);
+    if !preserve_animation {
+        command.args(["-frames:v", "1"]);
+    }
+    command
+        .args(["-an", "-f", "apng", "-plays", "0"])
+        .arg(output_path);
+    run_stage_progress(
+        app,
+        "APNG export",
+        &mut command,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(10.0, 70.0, "Encoding APNG"),
+    )?;
+
+    let mut optimize = Command::new(oxipng);
+    optimize.arg("-o").arg(effort_oxipng(&options.effort));
+    if !options.keep_metadata {
+        optimize.args(["--strip", "safe"]);
+    }
+    optimize.arg(output_path);
+    run_stage_progress(
+        app,
+        "OxiPNG",
+        &mut optimize,
+        None,
+        None,
+        full_log,
+        JobProgressRange::new(70.0, 95.0, "Optimizing APNG"),
+    )
 }
 
 fn social_video_filter(options: &SocialExportOptions, include_gradfun: bool) -> String {
@@ -2265,6 +4788,9 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
             .to_string_lossy()
             .to_string();
     }
+    if settings.temp_folder.trim().is_empty() {
+        settings.temp_folder = workspace_root().join("temp").to_string_lossy().to_string();
+    }
     if settings.cuda_bin_folder.trim().is_empty() {
         settings.cuda_bin_folder = find_cuda_bin_dir()
             .map(|path| path.to_string_lossy().to_string())
@@ -2302,6 +4828,521 @@ fn find_conda_in_dir(dir: &Path) -> Option<PathBuf> {
 
 fn facefusion_repo_ready() -> bool {
     facefusion_repo_dir().join("facefusion.py").exists()
+}
+
+struct SupirModelSpec {
+    name: &'static str,
+    label: &'static str,
+    sign: &'static str,
+    file_name: &'static str,
+    description: &'static str,
+    estimate: &'static str,
+    required: bool,
+    source_label: &'static str,
+    download_url: &'static str,
+    resolve_url: &'static str,
+    direct_download: bool,
+}
+
+struct SupirPreset {
+    edm_steps: &'static str,
+    s_cfg: &'static str,
+    s_stage2: &'static str,
+    spt_linear_cfg: &'static str,
+    s_noise: &'static str,
+    low_vram: bool,
+}
+
+fn supir_tool_dir() -> PathBuf {
+    workspace_root().join("tools").join("supir")
+}
+
+fn supir_repo_dir() -> PathBuf {
+    supir_tool_dir().join("repo")
+}
+
+fn supir_checkpoint_dir() -> PathBuf {
+    supir_tool_dir().join("checkpoints")
+}
+
+fn supir_requirements_path() -> PathBuf {
+    supir_tool_dir().join("requirements-videomaxxxing.txt")
+}
+
+fn supir_xformers_check_script_path() -> PathBuf {
+    supir_tool_dir().join("check_xformers.py")
+}
+
+fn supir_sdxl_checkpoint_path() -> PathBuf {
+    supir_checkpoint_dir().join("sd_xl_base_1.0_0.9vae.safetensors")
+}
+
+fn supir_repo_ready() -> bool {
+    let repo = supir_repo_dir();
+    repo.join("test.py").exists() && repo.join("SUPIR").exists()
+}
+
+fn supir_model_specs() -> Vec<SupirModelSpec> {
+    vec![
+        SupirModelSpec {
+            name: "SDXL base 1.0 0.9 VAE",
+            label: "Base model",
+            sign: "sdxl",
+            file_name: "sd_xl_base_1.0_0.9vae.safetensors",
+            description: "Required base model used by SUPIR's restoration pipeline.",
+            estimate: "~6.94 GB",
+            required: true,
+            source_label: "Hugging Face",
+            download_url: "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/sd_xl_base_1.0_0.9vae.safetensors",
+            resolve_url: "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0_0.9vae.safetensors",
+            direct_download: true,
+        },
+        SupirModelSpec {
+            name: "SUPIR-v0Q",
+            label: "Recommended quality model",
+            sign: "Q",
+            file_name: "SUPIR-v0Q.ckpt",
+            description: "Recommended quality model for general restoration.",
+            estimate: "~5.33 GB",
+            required: true,
+            source_label: "Google Drive",
+            download_url: "https://drive.google.com/drive/folders/1yELzm5SvAi9e7kPcO_jPp2XkTs4vK6aR?usp=sharing",
+            resolve_url: "",
+            direct_download: false,
+        },
+        SupirModelSpec {
+            name: "SUPIR-v0F",
+            label: "Optional fidelity model",
+            sign: "F",
+            file_name: "SUPIR-v0F.ckpt",
+            description: "Optional model that keeps more original detail on lightly degraded images.",
+            estimate: "~5.33 GB",
+            required: false,
+            source_label: "Google Drive",
+            download_url: "https://drive.google.com/drive/folders/1yELzm5SvAi9e7kPcO_jPp2XkTs4vK6aR?usp=sharing",
+            resolve_url: "",
+            direct_download: false,
+        },
+    ]
+}
+
+fn supir_model_spec(model: &str) -> Option<SupirModelSpec> {
+    let normalized = model.trim().to_lowercase();
+    supir_model_specs().into_iter().find(|spec| {
+        normalized == spec.name.to_lowercase()
+            || normalized == spec.sign.to_lowercase()
+            || normalized == spec.file_name.to_lowercase()
+    })
+}
+
+fn downloads_dir() -> Option<PathBuf> {
+    env::var("USERPROFILE")
+        .ok()
+        .map(PathBuf::from)
+        .map(|path| path.join("Downloads"))
+        .filter(|path| path.exists())
+}
+
+fn find_downloaded_checkpoint(file_name: &str) -> Option<PathBuf> {
+    let downloads = downloads_dir()?;
+    let direct = downloads.join(file_name);
+    if direct.exists() {
+        return Some(direct);
+    }
+    let stem = Path::new(file_name)
+        .file_stem()?
+        .to_string_lossy()
+        .to_string();
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let mut candidates = fs::read_dir(downloads)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+                && path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.starts_with(&stem))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    candidates.pop()
+}
+
+fn supir_checkpoints_ready() -> bool {
+    supir_sdxl_checkpoint_path().exists()
+        && supir_model_specs()
+            .iter()
+            .filter(|spec| spec.sign == "Q" || spec.sign == "F")
+            .any(|spec| supir_checkpoint_dir().join(spec.file_name).exists())
+}
+
+fn supir_cuda_ready() -> bool {
+    find_cuda_bin_dir().is_some() || env::var("CUDA_PATH").is_ok()
+}
+
+fn write_supir_xformers_check_script() -> Result<PathBuf, String> {
+    fs::create_dir_all(supir_tool_dir()).map_err(|err| err.to_string())?;
+    let script_path = supir_xformers_check_script_path();
+    fs::write(&script_path, SUPIR_XFORMERS_CHECK_SCRIPT.trim_start())
+        .map_err(|err| format!("Failed to write SUPIR xFormers check script: {err}"))?;
+    Ok(script_path)
+}
+
+fn install_supir_xformers_stages(
+    app: &tauri::AppHandle,
+    conda: &str,
+    repo_dir: &Path,
+    full_log: &mut String,
+) -> Result<(), String> {
+    let script_path = write_supir_xformers_check_script()?;
+
+    let mut install_xformers = Command::new(conda);
+    install_xformers.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        SUPIR_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        SUPIR_XFORMERS_VERSION,
+        "--no-deps",
+        "--only-binary=:all:",
+    ]);
+    run_stage(
+        app,
+        "SUPIR xFormers",
+        &mut install_xformers,
+        Some(repo_dir.to_path_buf()),
+        None,
+        full_log,
+    )?;
+
+    let mut xformers_info = Command::new(conda);
+    xformers_info.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        SUPIR_ENV_NAME,
+        "python",
+        "-m",
+        "xformers.info",
+    ]);
+    run_stage(
+        app,
+        "SUPIR xFormers check",
+        &mut xformers_info,
+        Some(repo_dir.to_path_buf()),
+        None,
+        full_log,
+    )?;
+
+    let mut xformers_smoke = Command::new(conda);
+    xformers_smoke.args(["run", "--no-capture-output", "-n", SUPIR_ENV_NAME, "python"]);
+    xformers_smoke.arg(script_path);
+    run_stage(
+        app,
+        "SUPIR xFormers check",
+        &mut xformers_smoke,
+        Some(repo_dir.to_path_buf()),
+        None,
+        full_log,
+    )
+}
+
+fn compact_status_message(message: &str) -> String {
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.len() <= 240 {
+        return normalized;
+    }
+    format!("{}...", &normalized[..240])
+}
+
+fn supir_xformers_probe(conda: &str) -> (bool, String, String) {
+    let Ok(script_path) = write_supir_xformers_check_script() else {
+        return (
+            false,
+            String::new(),
+            "Could not write xFormers validation script.".to_string(),
+        );
+    };
+    let output = Command::new(conda)
+        .args(["run", "-n", SUPIR_ENV_NAME, "python"])
+        .arg(script_path)
+        .output();
+    let Ok(output) = output else {
+        return (
+            false,
+            String::new(),
+            "Could not run xFormers validation.".to_string(),
+        );
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed = stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line.trim()).ok());
+    if let Some(value) = parsed {
+        let ready = output.status.success()
+            && value
+                .get("ready")
+                .and_then(|item| item.as_bool())
+                .unwrap_or(false);
+        let version = value
+            .get("version")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let message = value
+            .get("message")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let message = compact_status_message(&message);
+        return (ready, version, message);
+    }
+
+    let message = format!("{} {}", stdout.trim(), stderr.trim())
+        .trim()
+        .to_string();
+    (
+        false,
+        String::new(),
+        compact_status_message(default_if_empty(
+            &message,
+            "xFormers validation did not return a usable result.",
+        )),
+    )
+}
+
+fn supir_status() -> SupirStatus {
+    let repo_ready = supir_repo_ready();
+    let conda = find_tool("conda");
+    let env_ready = conda
+        .as_deref()
+        .map(|path| conda_named_env_ready(path, SUPIR_ENV_NAME))
+        .unwrap_or(false);
+    let cuda_ready = supir_cuda_ready();
+    let checkpoints_ready = supir_checkpoints_ready();
+    let (xformers_ready, xformers_version, xformers_message) = if !repo_ready {
+        (
+            false,
+            String::new(),
+            "SUPIR repo is not installed.".to_string(),
+        )
+    } else if env_ready && cuda_ready {
+        conda
+            .as_deref()
+            .map(supir_xformers_probe)
+            .unwrap_or_else(|| {
+                (
+                    false,
+                    String::new(),
+                    "Conda was not found in PATH.".to_string(),
+                )
+            })
+    } else if !env_ready {
+        (
+            false,
+            String::new(),
+            format!("Conda env {SUPIR_ENV_NAME} is not ready."),
+        )
+    } else {
+        (
+            false,
+            String::new(),
+            "CUDA is required before validating xFormers.".to_string(),
+        )
+    };
+    let checkpoint_path = supir_checkpoint_dir();
+    let (state, message) = if !repo_ready {
+        (
+            "missing".to_string(),
+            "SUPIR repo is not installed. Checkpoints are managed manually because the upstream files are hosted outside GitHub releases.".to_string(),
+        )
+    } else if conda.is_none() {
+        (
+            "needs_setup".to_string(),
+            "SUPIR repo exists, but Conda was not found in PATH.".to_string(),
+        )
+    } else if !env_ready {
+        (
+            "needs_setup".to_string(),
+            format!("SUPIR repo exists, but Conda env {SUPIR_ENV_NAME} is not ready."),
+        )
+    } else if !cuda_ready {
+        (
+            "needs_setup".to_string(),
+            "SUPIR is installed, but CUDA was not detected. SUPIR's upstream script requires CUDA."
+                .to_string(),
+        )
+    } else if !xformers_ready {
+        (
+            "needs_setup".to_string(),
+            format!("SUPIR xFormers acceleration is not ready. {xformers_message}"),
+        )
+    } else if !checkpoints_ready {
+        (
+            "needs_setup".to_string(),
+            format!(
+                "SUPIR is installed. Add sd_xl_base_1.0_0.9vae.safetensors and SUPIR-v0Q.ckpt or SUPIR-v0F.ckpt to {}.",
+                checkpoint_path.display()
+            ),
+        )
+    } else {
+        (
+            "installed".to_string(),
+            "SUPIR repo, Conda environment, CUDA, and checkpoints are ready.".to_string(),
+        )
+    };
+
+    SupirStatus {
+        state,
+        repo_path: supir_repo_dir().to_string_lossy().to_string(),
+        env_name: SUPIR_ENV_NAME.to_string(),
+        checkpoint_path: checkpoint_path.to_string_lossy().to_string(),
+        current_size_label: format_bytes(dir_size(&supir_tool_dir())),
+        estimated_install_label: "~20-80 GB depending on checkpoints".to_string(),
+        cuda_ready,
+        checkpoints_ready,
+        xformers_ready,
+        xformers_version,
+        xformers_message,
+        message,
+    }
+}
+
+fn supir_preset(preset: &str) -> SupirPreset {
+    match preset {
+        "fidelity" => SupirPreset {
+            edm_steps: "50",
+            s_cfg: "7.5",
+            s_stage2: "1",
+            spt_linear_cfg: "4.0",
+            s_noise: "1.003",
+            low_vram: false,
+        },
+        "low_vram" => SupirPreset {
+            edm_steps: "30",
+            s_cfg: "6.0",
+            s_stage2: "1",
+            spt_linear_cfg: "3.0",
+            s_noise: "1.001",
+            low_vram: true,
+        },
+        _ => SupirPreset {
+            edm_steps: "50",
+            s_cfg: "7.5",
+            s_stage2: "1",
+            spt_linear_cfg: "4.0",
+            s_noise: "1.003",
+            low_vram: false,
+        },
+    }
+}
+
+fn set_yaml_scalar(content: &str, key: &str, value: &Path) -> String {
+    let value = value.to_string_lossy().replace('\\', "/");
+    let mut found = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let indent_len = line.len() - line.trim_start().len();
+        if line.trim_start().starts_with(&format!("{key}:")) {
+            lines.push(format!("{}{}: {}", &line[..indent_len], key, value));
+            found = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !found {
+        lines.push(format!("{key}: {value}"));
+    }
+    lines.join("\n")
+}
+
+fn is_supir_managed_dependency(dependency: &str) -> bool {
+    let normalized = dependency.trim().to_lowercase();
+    [
+        "fastapi",
+        "gradio",
+        "gradio_client",
+        "gradio_imageslider",
+        "torch",
+        "torchvision",
+        "torchaudio",
+        "triton",
+        "uvicorn",
+        "xformers",
+    ]
+    .iter()
+    .any(|name| {
+        normalized == *name
+            || normalized.starts_with(&format!("{name}=="))
+            || normalized.starts_with(&format!("{name}>"))
+            || normalized.starts_with(&format!("{name}<"))
+            || normalized.starts_with(&format!("{name}~"))
+            || normalized.starts_with(&format!("{name}["))
+    })
+}
+
+fn write_supir_runtime_files() -> Result<(), String> {
+    fs::create_dir_all(supir_checkpoint_dir()).map_err(|err| err.to_string())?;
+    let repo_dir = supir_repo_dir();
+    let source_requirements = repo_dir.join("requirements.txt");
+    let requirements = fs::read_to_string(&source_requirements)
+        .map_err(|err| format!("Failed to read {}: {err}", source_requirements.display()))?;
+    let filtered = requirements
+        .split_whitespace()
+        .filter(|dependency| !is_supir_managed_dependency(dependency))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(supir_requirements_path(), filtered)
+        .map_err(|err| format!("Failed to write SUPIR requirements: {err}"))?;
+
+    let ckpt_paths = r#"LLAVA_CLIP_PATH = None
+LLAVA_MODEL_PATH = 'liuhaotian/llava-v1.5-13b'
+SDXL_CLIP1_PATH = None
+SDXL_CLIP2_CKPT_PTH = None
+"#;
+    fs::write(repo_dir.join("CKPT_PTH.py"), ckpt_paths)
+        .map_err(|err| format!("Failed to write SUPIR checkpoint paths: {err}"))?;
+
+    let options_path = repo_dir.join("options").join("SUPIR_v0.yaml");
+    if options_path.exists() {
+        let original = fs::read_to_string(&options_path).map_err(|err| err.to_string())?;
+        let updated = set_yaml_scalar(&original, "SDXL_CKPT", &supir_sdxl_checkpoint_path());
+        let updated = set_yaml_scalar(
+            &updated,
+            "SUPIR_CKPT_F",
+            &supir_checkpoint_dir().join("SUPIR-v0F.ckpt"),
+        );
+        let updated = set_yaml_scalar(
+            &updated,
+            "SUPIR_CKPT_Q",
+            &supir_checkpoint_dir().join("SUPIR-v0Q.ckpt"),
+        );
+        fs::write(&options_path, updated)
+            .map_err(|err| format!("Failed to patch SUPIR options: {err}"))?;
+    }
+
+    Ok(())
 }
 
 fn facefusion_status() -> FaceFusionStatus {
@@ -2356,8 +5397,12 @@ fn facefusion_status() -> FaceFusionStatus {
 }
 
 fn conda_env_ready(conda: &str) -> bool {
+    conda_named_env_ready(conda, FACEFUSION_ENV_NAME)
+}
+
+fn conda_named_env_ready(conda: &str, env_name: &str) -> bool {
     Command::new(conda)
-        .args(["run", "-n", FACEFUSION_ENV_NAME, "python", "--version"])
+        .args(["run", "-n", env_name, "python", "--version"])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -2600,6 +5645,16 @@ fn local_tool_candidates(name: &str) -> Vec<PathBuf> {
             .join("rife-ncnn-vulkan.exe")],
         "ffmpeg" => vec![root.join("tools").join("ffmpeg").join("ffmpeg.exe")],
         "ffprobe" => vec![root.join("tools").join("ffmpeg").join("ffprobe.exe")],
+        "magick" => vec![root.join("tools").join("imagemagick").join("magick.exe")],
+        "oxipng" => vec![root.join("tools").join("oxipng").join("oxipng.exe")],
+        "avifenc" => vec![root.join("tools").join("libavif").join("avifenc.exe")],
+        "avifdec" => vec![root.join("tools").join("libavif").join("avifdec.exe")],
+        "cwebp" => vec![root.join("tools").join("libwebp").join("cwebp.exe")],
+        "dwebp" => vec![root.join("tools").join("libwebp").join("dwebp.exe")],
+        "gif2webp" => vec![root.join("tools").join("libwebp").join("gif2webp.exe")],
+        "img2webp" => vec![root.join("tools").join("libwebp").join("img2webp.exe")],
+        "cjpeg" => vec![root.join("tools").join("mozjpeg").join("cjpeg.exe")],
+        "jpegtran" => vec![root.join("tools").join("mozjpeg").join("jpegtran.exe")],
         "conda" => vec![
             root.join("tools")
                 .join("miniforge")
@@ -2886,6 +5941,121 @@ fn image_data_url(path: &Path, mime_type: &str) -> Result<String, String> {
     ))
 }
 
+fn write_data_url_to_path(data_url: &str, path: &Path) -> Result<(), String> {
+    let (_, encoded) = data_url
+        .split_once(',')
+        .ok_or("Data URL did not contain encoded data.")?;
+    let bytes = general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|err| format!("Data URL decode failed: {err}"))?;
+    fs::write(path, bytes).map_err(|err| err.to_string())
+}
+
+fn output_gif_name(name: &str) -> String {
+    let cleaned = safe_output_filename(name, "image_dither.gif");
+    if Path::new(&cleaned)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("gif"))
+    {
+        cleaned
+    } else {
+        let stem = Path::new(&cleaned)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&cleaned);
+        format!("{stem}.gif")
+    }
+}
+
+fn concat_file_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace('\'', "'\\''")
+}
+
+fn probe_image_dimensions(path: &Path) -> Result<(u64, u64), String> {
+    let ffprobe = find_tool("ffprobe").ok_or("FFprobe was not found.")?;
+    let output = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|err| format!("Failed to run FFprobe: {err}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    let data: Value = serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+    let stream = data["streams"]
+        .as_array()
+        .and_then(|streams| streams.first())
+        .ok_or("FFprobe did not report an image stream.")?;
+    Ok((
+        stream["width"].as_u64().unwrap_or(0),
+        stream["height"].as_u64().unwrap_or(0),
+    ))
+}
+
+fn gif_frame_delays_ms(path: &Path, frame_count: usize) -> Vec<u64> {
+    let fallback = vec![100; frame_count];
+    let Some(ffprobe) = find_tool("ffprobe") else {
+        return fallback;
+    };
+    let Ok(output) = Command::new(ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pkt_duration_time,duration_time",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+    else {
+        return fallback;
+    };
+    if !output.status.success() {
+        return fallback;
+    }
+    let Ok(data) = serde_json::from_slice::<Value>(&output.stdout) else {
+        return fallback;
+    };
+    let Some(frames) = data["frames"].as_array() else {
+        return fallback;
+    };
+    let mut delays = frames
+        .iter()
+        .filter_map(|frame| {
+            frame["pkt_duration_time"]
+                .as_str()
+                .or_else(|| frame["duration_time"].as_str())
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| *value > 0.0)
+                .map(|value| (value * 1000.0).round() as u64)
+        })
+        .collect::<Vec<_>>();
+    if delays.is_empty() {
+        return fallback;
+    }
+    while delays.len() < frame_count {
+        let last = delays.last().copied().unwrap_or(100);
+        delays.push(last);
+    }
+    delays.truncate(frame_count);
+    delays
+}
+
 fn count_files_with_extension(dir: &Path, extension: &str) -> Result<usize, String> {
     let mut total = 0;
     for entry in fs::read_dir(dir).map_err(|err| err.to_string())? {
@@ -2915,6 +6085,24 @@ fn find_file_by_name(root: &Path, name: &str) -> Option<PathBuf> {
             if let Some(found) = find_file_by_name(&path, name) {
                 return Some(found);
             }
+        }
+    }
+    None
+}
+
+fn find_first_file_with_extension(root: &Path, extension: &str) -> Option<PathBuf> {
+    for entry in fs::read_dir(root).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            if let Some(found) = find_first_file_with_extension(&path, extension) {
+                return Some(found);
+            }
+        } else if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            return Some(path);
         }
     }
     None
@@ -3011,7 +6199,7 @@ fn output_name_with_extension(name: &str, action: &str, audio_format: Option<&st
     let desired = extension.trim_start_matches('.');
     let path = Path::new(stem);
     let current = path.extension().and_then(|value| value.to_str());
-    if current.is_some_and(|value| value.eq_ignore_ascii_case(desired)) {
+    let candidate = if current.is_some_and(|value| value.eq_ignore_ascii_case(desired)) {
         stem.to_string()
     } else {
         let clean_stem = path
@@ -3019,6 +6207,126 @@ fn output_name_with_extension(name: &str, action: &str, audio_format: Option<&st
             .and_then(|value| value.to_str())
             .unwrap_or(stem);
         format!("{clean_stem}{extension}")
+    };
+    safe_output_filename(&candidate, &format!("output{extension}"))
+}
+
+fn output_image_name(name: &str, input_path: &Path, suffix: &str) -> String {
+    let fallback_stem = input_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("image");
+    let fallback = format!("{fallback_stem}_{suffix}.png");
+    let cleaned = safe_output_filename(name, &fallback);
+    if Path::new(&cleaned)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("png"))
+    {
+        cleaned
+    } else {
+        let stem = Path::new(&cleaned)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&cleaned);
+        format!("{stem}.png")
+    }
+}
+
+fn normalized_audio_format(format: &str) -> &'static str {
+    match format.trim().to_lowercase().as_str() {
+        "wav" => "wav",
+        "flac" => "flac",
+        "m4a" | "aac" => "m4a",
+        "ogg" | "opus" => "ogg",
+        _ => "mp3",
+    }
+}
+
+fn audio_output_name(name: &str, input_path: &Path, format: &str) -> String {
+    let fallback_stem = input_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("audio");
+    let fallback = format!("{fallback_stem}_{format}.{format}");
+    let cleaned = safe_output_filename(name, &fallback);
+    if Path::new(&cleaned)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(format))
+    {
+        cleaned
+    } else {
+        let stem = Path::new(&cleaned)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&cleaned);
+        format!("{stem}.{format}")
+    }
+}
+
+fn add_audio_encode_args(
+    command: &mut Command,
+    format: &str,
+    options: &AudioJobOptions,
+) -> Result<(), String> {
+    match format {
+        "wav" => {
+            command.args(["-c:a", "pcm_s16le"]);
+        }
+        "flac" => {
+            command.args(["-c:a", "flac", "-compression_level", "8"]);
+        }
+        "m4a" => {
+            command.args(["-c:a", "aac"]);
+            push_audio_bitrate(command, &options.bitrate, "192k");
+        }
+        "ogg" => {
+            command.args(["-c:a", "libvorbis"]);
+            push_audio_bitrate(command, &options.bitrate, "192k");
+        }
+        "mp3" => {
+            command.args(["-c:a", "libmp3lame"]);
+            push_audio_bitrate(command, &options.bitrate, "192k");
+        }
+        _ => return Err("Unsupported audio format.".into()),
+    }
+
+    if let Some(sample_rate) = normalized_sample_rate(&options.sample_rate) {
+        command.arg("-ar").arg(sample_rate);
+    }
+    if let Some(channels) = normalized_channels(&options.channels) {
+        command.arg("-ac").arg(channels);
+    }
+    Ok(())
+}
+
+fn push_audio_bitrate(command: &mut Command, bitrate: &str, fallback: &str) {
+    let value = match bitrate.trim() {
+        "96k" | "128k" | "160k" | "192k" | "256k" | "320k" => bitrate.trim(),
+        _ => fallback,
+    };
+    command.arg("-b:a").arg(value);
+}
+
+fn normalized_sample_rate(sample_rate: &str) -> Option<&'static str> {
+    match sample_rate.trim() {
+        "22050" => Some("22050"),
+        "32000" => Some("32000"),
+        "44100" => Some("44100"),
+        "48000" => Some("48000"),
+        "96000" => Some("96000"),
+        _ => None,
+    }
+}
+
+fn normalized_channels(channels: &str) -> Option<&'static str> {
+    match channels.trim() {
+        "1" => Some("1"),
+        "2" => Some("2"),
+        _ => None,
     }
 }
 
@@ -3049,29 +6357,53 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             detect_tools,
+            check_tool_updates,
             detect_facefusion,
+            detect_supir,
             get_tool_storage,
             probe_video,
+            probe_audio,
             generate_thumbnails,
             list_realesrgan_models,
             detect_realesrgan_devices,
             list_rife_models,
+            list_supir_models,
             delete_tool_model,
             default_output_dir,
             get_app_settings,
             save_app_settings,
+            flush_temp_folder,
             save_text_to_downloads,
             save_data_url_to_downloads,
+            extract_gif_frames,
+            save_gif_frames_to_downloads,
+            run_image_compress_job,
+            save_image_compress_preview,
             run_ffmpeg_job,
+            run_audio_job,
             run_social_export_job,
             run_upscale_job,
             run_rife_job,
             run_facefusion_job,
+            run_supir_image_job,
             cancel_upscale_job,
+            cancel_audio_job,
             cancel_facefusion_job,
+            cancel_supir_image_job,
+            import_supir_checkpoint,
+            import_supir_checkpoint_from_downloads,
+            download_supir_checkpoint,
+            delete_supir_checkpoint,
             install_or_update_facefusion,
+            install_or_update_supir,
+            install_or_update_supir_xformers,
+            delete_supir_xformers,
             update_ffmpeg,
             update_miniforge,
+            update_imagemagick,
+            delete_imagemagick,
+            update_image_codec_tool,
+            delete_image_codec_tool,
             update_realesrgan,
             update_rife,
             compare_realesrgan_models

@@ -1,0 +1,45 @@
+# Runtime and dependency folders.
+.git/
+app/node_modules/
+app/dist/
+app/dist-ssr/
+app/src-tauri/target/
+app/src-tauri/gen/
+input/
+output/
+temp/
+tools/
+logs/
+app_settings.local.json
+.env.local
+
+# Python and local environment artifacts.
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+conda-meta/
+
+# Large generated media.
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.gif
+*.apng
+*.wav
+*.mp3
+*.flac
+*.aac
+*.m4a
+*.ogg
+
+# Local databases and caches.
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal

@@ -6,6 +6,19 @@ dist-ssr/
 # Tauri/Rust generated files.
 src-tauri/target/
 src-tauri/gen/schemas/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+src-tauri/.tauri/
+src-tauri/.cargo/config.toml
+src-tauri/Cargo.lock.bak
+
+# Local signing/bundling secrets.
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cert
 
 # Logs.
 logs/
@@ -19,6 +32,11 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
 
 # Editor/OS.
 .vscode/*
