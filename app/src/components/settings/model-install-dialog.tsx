@@ -1,5 +1,6 @@
 import { PrimaryButton, SecondaryButton } from "@/components/app-controls";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Download } from "lucide-react";
 import {
   Dialog,
   DialogClose,
@@ -48,7 +49,7 @@ export function ModelInstallDialog({
             <SecondaryButton>Cancel</SecondaryButton>
           </DialogClose>
           <PrimaryButton disabled={!modelInstall.selectedInstallModels.length || isInstalling} onClick={modelInstall.confirmModelInstall}>
-            <span className="material-symbols-rounded" aria-hidden="true">download</span>
+            <Download />
             Install Selected
           </PrimaryButton>
         </DialogFooter>

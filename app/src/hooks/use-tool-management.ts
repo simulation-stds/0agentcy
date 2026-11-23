@@ -1,3 +1,4 @@
+import type { ToolKey } from "@/hooks/use-tool-state";
 import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { ImageCodecTool, InstalledModelLike, ModelTool } from "@/lib/app-options";
@@ -13,7 +14,7 @@ type UseToolManagementArgs = {
   models: InstalledModelLike[];
   rifeModels: InstalledModelLike[];
   appendLog: (message: string) => void;
-  refreshToolState: () => Promise<void>;
+  refreshToolState: (affected?: ToolKey[]) => Promise<void>;
 };
 
 export function useToolManagement({
@@ -26,9 +27,10 @@ export function useToolManagement({
   const [isUpdatingEsrgan, setIsUpdatingEsrgan] = useState(false);
   const [isUpdatingRife, setIsUpdatingRife] = useState(false);
   const [isUpdatingFaceFusion, setIsUpdatingFaceFusion] = useState(false);
-  const [isUpdatingSupir, setIsUpdatingSupir] = useState(false);
-  const [isUpdatingSupirXformers, setIsUpdatingSupirXformers] = useState(false);
-  const [activeSupirCheckpoint, setActiveSupirCheckpoint] = useState("");
+  const [isInstallingVosr, setIsInstallingVosr] = useState(false);
+  const [isUpdatingFlux2, setIsUpdatingFlux2] = useState(false);
+  const [isUpdatingWan21, setIsUpdatingWan21] = useState(false);
+  const [isUpdatingWan22, setIsUpdatingWan22] = useState(false);
   const [isUpdatingFfmpeg, setIsUpdatingFfmpeg] = useState(false);
   const [isUpdatingImageMagick, setIsUpdatingImageMagick] = useState(false);
   const [isUpdatingMiniforge, setIsUpdatingMiniforge] = useState(false);
@@ -42,7 +44,7 @@ export function useToolManagement({
         const result = await invoke<JobResult>("update_realesrgan", { selectedModels });
         appendTailLog(appendLog, result.log);
         appendLog(`Real-ESRGAN ready: ${result.outputPath}`);
-        await refreshToolState();
+        await refreshToolState(["realesrgan", "devices"]);
       } catch (error) {
         appendLog(`Real-ESRGAN update failed: ${String(error).trim()}`);
       } finally {
@@ -60,7 +62,7 @@ export function useToolManagement({
         const result = await invoke<JobResult>("update_rife", { selectedModels });
         appendTailLog(appendLog, result.log);
         appendLog(`RIFE ready: ${result.outputPath}`);
-        await refreshToolState();
+        await refreshToolState(["rife"]);
       } catch (error) {
         appendLog(`RIFE update failed: ${String(error).trim()}`);
       } finally {
@@ -77,7 +79,7 @@ export function useToolManagement({
       const result = await invoke<JobResult>("install_or_update_facefusion", { onnxruntime: faceFusionRuntime });
       appendTailLog(appendLog, result.log);
       appendLog(`FaceFusion ready: ${result.outputPath}`);
-      await refreshToolState();
+      await refreshToolState(["facefusion"]);
     } catch (error) {
       appendLog(`FaceFusion update failed: ${String(error).trim()}`);
     } finally {
@@ -85,107 +87,94 @@ export function useToolManagement({
     }
   }, [appendLog, faceFusionRuntime, refreshToolState]);
 
-  const updateSupir = useCallback(async () => {
-    setIsUpdatingSupir(true);
-    appendLog("Starting SUPIR install/update...");
+  const installVosr = useCallback(async () => {
+    setIsInstallingVosr(true);
+    appendLog("Starting VOSR 2.0 installation...");
     try {
-      const result = await invoke<JobResult>("install_or_update_supir");
-      appendTailLog(appendLog, result.log);
-      appendLog(`SUPIR ready: ${result.outputPath}`);
-      await refreshToolState();
+      const result = await invoke<{ message: string }>("install_vosr");
+      appendLog(result.message);
     } catch (error) {
-      appendLog(`SUPIR update failed: ${String(error).trim()}`);
+      appendLog(`VOSR installation failed: ${String(error).trim()}`);
     } finally {
-      setIsUpdatingSupir(false);
+      await refreshToolState(["vosr"]);
+      setIsInstallingVosr(false);
     }
   }, [appendLog, refreshToolState]);
 
-  const updateSupirXformers = useCallback(async () => {
-    setIsUpdatingSupirXformers(true);
-    appendLog("Starting SUPIR xFormers install/repair...");
+  const updateFlux2 = useCallback(async () => {
+    setIsUpdatingFlux2(true);
+    appendLog("Starting Flux.2 install/update...");
     try {
-      const result = await invoke<JobResult>("install_or_update_supir_xformers");
+      const result = await invoke<JobResult>("install_or_update_flux2");
       appendTailLog(appendLog, result.log);
-      appendLog(`SUPIR xFormers ready: ${result.outputPath}`);
-      await refreshToolState();
+      appendLog(`Flux.2 ready: ${result.outputPath}`);
+      await refreshToolState(["flux2"]);
     } catch (error) {
-      appendLog(`SUPIR xFormers install failed: ${String(error).trim()}`);
+      appendLog(`Flux.2 update failed: ${String(error).trim()}`);
     } finally {
-      setIsUpdatingSupirXformers(false);
+      setIsUpdatingFlux2(false);
     }
   }, [appendLog, refreshToolState]);
 
-  const deleteSupirXformers = useCallback(async () => {
-    appendLog("Removing SUPIR xFormers...");
+  const updateWan22 = useCallback(async () => {
+    setIsUpdatingWan22(true);
+    appendLog("Starting Wan2.2 install/update...");
     try {
-      const result = await invoke<JobResult>("delete_supir_xformers");
+      const result = await invoke<JobResult>("install_or_update_wan22");
       appendTailLog(appendLog, result.log);
-      appendLog(`SUPIR xFormers removed: ${result.outputPath}`);
-      await refreshToolState();
+      appendLog(`Wan2.2 ready: ${result.outputPath}`);
+      await refreshToolState(["wan22"]);
     } catch (error) {
-      appendLog(`SUPIR xFormers remove failed: ${String(error).trim()}`);
+      appendLog(`Wan2.2 update failed: ${String(error).trim()}`);
+    } finally {
+      setIsUpdatingWan22(false);
     }
   }, [appendLog, refreshToolState]);
 
-  const importSupirCheckpoint = useCallback(
-    async (sourcePath: string, checkpointName: string) => {
-      appendLog(`Importing ${checkpointName}...`);
-      try {
-        const result = await invoke<JobResult>("import_supir_checkpoint", { sourcePath, checkpointName });
-        appendLog(result.log);
-        await refreshToolState();
-      } catch (error) {
-        appendLog(`SUPIR checkpoint import failed: ${String(error).trim()}`);
-      }
-    },
-    [appendLog, refreshToolState],
-  );
+  const updateWan21 = useCallback(async () => {
+    setIsUpdatingWan21(true);
+    appendLog("Starting Wan2.1 install/update...");
+    try {
+      const result = await invoke<JobResult>("install_or_update_wan21");
+      appendTailLog(appendLog, result.log);
+      appendLog(`Wan2.1 ready: ${result.outputPath}`);
+      await refreshToolState(["wan21"]);
+    } catch (error) {
+      appendLog(`Wan2.1 update failed: ${String(error).trim()}`);
+    } finally {
+      setIsUpdatingWan21(false);
+    }
+  }, [appendLog, refreshToolState]);
 
-  const importSupirCheckpointFromDownloads = useCallback(
-    async (checkpointName: string) => {
-      appendLog(`Looking for ${checkpointName} in Downloads...`);
-      try {
-        const result = await invoke<JobResult>("import_supir_checkpoint_from_downloads", { checkpointName });
-        appendLog(result.log);
-        await refreshToolState();
-      } catch (error) {
-        appendLog(`SUPIR checkpoint auto-import failed: ${String(error).trim()}`);
-      }
-    },
-    [appendLog, refreshToolState],
-  );
+  const deleteWan22 = useCallback(async () => {
+    setIsUpdatingWan22(true);
+    appendLog("Removing Wan2.2...");
+    try {
+      const result = await invoke<JobResult>("delete_wan22");
+      appendLog(result.log);
+      appendLog(`Wan2.2 removed: ${result.outputPath}`);
+      await refreshToolState(["wan22"]);
+    } catch (error) {
+      appendLog(`Wan2.2 remove failed: ${String(error).trim()}`);
+    } finally {
+      setIsUpdatingWan22(false);
+    }
+  }, [appendLog, refreshToolState]);
 
-  const downloadSupirCheckpoint = useCallback(
-    async (checkpointName: string) => {
-      setActiveSupirCheckpoint(checkpointName);
-      appendLog(`Downloading ${checkpointName}...`);
-      try {
-        const result = await invoke<JobResult>("download_supir_checkpoint", { checkpointName });
-        appendTailLog(appendLog, result.log);
-        appendLog(`SUPIR checkpoint ready: ${result.outputPath}`);
-        await refreshToolState();
-      } catch (error) {
-        appendLog(`SUPIR checkpoint download failed: ${String(error).trim()}`);
-      } finally {
-        setActiveSupirCheckpoint("");
-      }
-    },
-    [appendLog, refreshToolState],
-  );
-
-  const deleteSupirCheckpoint = useCallback(
-    async (checkpointName: string) => {
-      appendLog(`Removing ${checkpointName}...`);
-      try {
-        const result = await invoke<JobResult>("delete_supir_checkpoint", { checkpointName });
-        appendLog(result.log);
-        await refreshToolState();
-      } catch (error) {
-        appendLog(`SUPIR checkpoint remove failed: ${String(error).trim()}`);
-      }
-    },
-    [appendLog, refreshToolState],
-  );
+  const deleteWan21 = useCallback(async () => {
+    setIsUpdatingWan21(true);
+    appendLog("Removing Wan2.1...");
+    try {
+      const result = await invoke<JobResult>("delete_wan21");
+      appendLog(result.log);
+      appendLog(`Wan2.1 removed: ${result.outputPath}`);
+      await refreshToolState(["wan21"]);
+    } catch (error) {
+      appendLog(`Wan2.1 remove failed: ${String(error).trim()}`);
+    } finally {
+      setIsUpdatingWan21(false);
+    }
+  }, [appendLog, refreshToolState]);
 
   const updateFfmpeg = useCallback(async () => {
     setIsUpdatingFfmpeg(true);
@@ -194,7 +183,7 @@ export function useToolManagement({
       const result = await invoke<JobResult>("update_ffmpeg");
       appendTailLog(appendLog, result.log);
       appendLog(`FFmpeg ready: ${result.outputPath}`);
-      await refreshToolState();
+      await refreshToolState(["ffmpeg", "ffprobe"]);
     } catch (error) {
       appendLog(`FFmpeg update failed: ${String(error).trim()}`);
     } finally {
@@ -224,7 +213,7 @@ export function useToolManagement({
       const result = await invoke<JobResult>("update_imagemagick");
       appendTailLog(appendLog, result.log);
       appendLog(`ImageMagick ready: ${result.outputPath}`);
-      await refreshToolState();
+      await refreshToolState(["imagemagick"]);
     } catch (error) {
       appendLog(`ImageMagick update failed: ${String(error).trim()}`);
     } finally {
@@ -238,7 +227,7 @@ export function useToolManagement({
     try {
       const result = await invoke<JobResult>("delete_imagemagick");
       appendLog(result.log);
-      await refreshToolState();
+      await refreshToolState(["imagemagick"]);
     } catch (error) {
       appendLog(`ImageMagick remove failed: ${String(error).trim()}`);
     } finally {
@@ -254,7 +243,7 @@ export function useToolManagement({
         const result = await invoke<JobResult>("update_image_codec_tool", { tool });
         appendTailLog(appendLog, result.log);
         appendLog(`${tool} ready: ${result.outputPath}`);
-        await refreshToolState();
+        await refreshToolState([tool]);
       } catch (error) {
         appendLog(`${tool} update failed: ${String(error).trim()}`);
       } finally {
@@ -271,7 +260,7 @@ export function useToolManagement({
       try {
         const result = await invoke<JobResult>("delete_image_codec_tool", { tool });
         appendLog(result.log);
-        await refreshToolState();
+        await refreshToolState([tool]);
       } catch (error) {
         appendLog(`${tool} remove failed: ${String(error).trim()}`);
       } finally {
@@ -287,7 +276,7 @@ export function useToolManagement({
       try {
         const result = await invoke<JobResult>("delete_tool_model", { tool, model });
         appendLog(result.log);
-        await refreshToolState();
+        await refreshToolState([tool]);
       } catch (error) {
         appendLog(`Model remove failed: ${String(error).trim()}`);
       }
@@ -309,9 +298,11 @@ export function useToolManagement({
     isUpdatingEsrgan,
     isUpdatingRife,
     isUpdatingFaceFusion,
-    isUpdatingSupir,
-    isUpdatingSupirXformers,
-    activeSupirCheckpoint,
+    isInstallingVosr,
+    installVosr,
+    isUpdatingFlux2,
+    isUpdatingWan21,
+    isUpdatingWan22,
     isUpdatingFfmpeg,
     isUpdatingImageMagick,
     isUpdatingMiniforge,
@@ -319,13 +310,11 @@ export function useToolManagement({
     updateRealEsrgan,
     updateRife,
     updateFaceFusion,
-    updateSupir,
-    updateSupirXformers,
-    deleteSupirXformers,
-    importSupirCheckpoint,
-    importSupirCheckpointFromDownloads,
-    downloadSupirCheckpoint,
-    deleteSupirCheckpoint,
+    updateFlux2,
+    updateWan21,
+    updateWan22,
+    deleteWan21,
+    deleteWan22,
     updateFfmpeg,
     updateImageMagick,
     deleteImageMagick,

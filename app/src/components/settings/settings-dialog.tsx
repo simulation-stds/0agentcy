@@ -1,8 +1,14 @@
-import { useCallback, useState } from "react";
+import { VosrSettings } from "@/components/settings/vosr-settings";
+import { SubtitleFontSettings } from "@/components/settings/subtitle-font-settings";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
+import type { Transcription } from "@/hooks/use-transcription";
+import { TranscriptionTools } from "@/components/transcription-tools";
+import { AudioModelSettings } from "@/components/settings/audio-model-settings";
+import type { useAudioModels } from "@/hooks/use-audio-models";
 import { GeneralSettings } from "@/components/settings/general-settings";
 import { MustHaveSettings } from "@/components/settings/must-have-settings";
 import { SettingsSidebar } from "@/components/settings/settings-sidebar";
@@ -24,7 +30,12 @@ import {
 } from "@/lib/app-options";
 import { createEmptyUpdateAvailability, type UpdateAvailability } from "@/lib/update-availability";
 
+import { ToolCheckContext } from "@/components/settings/tool-check-context";
+import { settingsTools } from "@/lib/tool-loading";
+
 type SettingsDialogProps = {
+  transcription: Transcription;
+  audioModels: ReturnType<typeof useAudioModels>;
   settingsState: ReturnType<typeof useSettingsState>;
   appSettingsState: ReturnType<typeof useAppSettings>;
   filePickers: ReturnType<typeof useFilePickers>;
@@ -36,6 +47,8 @@ type SettingsDialogProps = {
 };
 
 export function SettingsDialog({
+  transcription,
+  audioModels,
   settingsState,
   appSettingsState,
   filePickers,
@@ -45,8 +58,21 @@ export function SettingsDialog({
   toolState,
   videoForm,
 }: SettingsDialogProps) {
-  const { tools, models, rifeModels, faceFusionStatus, supirStatus, supirModels } = toolState;
+  const { tools, models, rifeModels, faceFusionStatus, flux2Status, wan21Status, wan22Status } = toolState;
   const [updateAvailability, setUpdateAvailability] = useState(createEmptyUpdateAvailability);
+  const { ensureTool, ensureStorage } = toolState;
+  const subtab = settingsState.settingsTab === "general" ? settingsState.generalTab : settingsState.settingsTab === "must" ? settingsState.mustHaveTab : settingsState.modelTab;
+  const requested = settingsTools(settingsState.settingsTab, subtab);
+  useEffect(() => {
+    if (!settingsState.isSettingsOpen) return;
+    for (const tool of settingsTools(settingsState.settingsTab, subtab)) void ensureTool(tool);
+  }, [settingsState.isSettingsOpen, settingsState.settingsTab, subtab, ensureTool]);
+  useEffect(() => {
+    if (settingsState.isSettingsOpen && settingsState.expandedTool) void ensureStorage(settingsState.expandedTool);
+  }, [settingsState.isSettingsOpen, settingsState.expandedTool, ensureStorage]);
+
+  const failedTools = requested.filter(tool => toolState.checks[tool] === "failed");
+
 
   const checkUpdates = useCallback(async () => {
     await toolState.refreshToolState();
@@ -69,8 +95,13 @@ export function SettingsDialog({
           <SettingsSidebar onCheckUpdates={checkUpdates} />
 
           <ScrollArea className="settings-content-scroll">
+            <ToolCheckContext.Provider value={{ checks: toolState.checks, retry: tool => { void toolState.refreshToolState([tool]); } }}>
             <div className="settings-content">
+              {failedTools.length > 0 && (
+                <button type="button" onClick={() => void toolState.refreshToolState(failedTools)}>Retry checks</button>
+              )}
               <TabsContent value="general" className="settings-tab-content">
+
                 <GeneralSettings
                   defaultDownloadFolder={appSettingsState.appSettings.defaultDownloadFolder}
                   tempFolder={appSettingsState.appSettings.tempFolder}
@@ -87,11 +118,12 @@ export function SettingsDialog({
                   onChooseDefaultDownloadFolder={filePickers.chooseDefaultDownloadFolder}
                   onChooseTempFolder={filePickers.chooseTempFolder}
                   onFlushTempFolder={appSettingsState.flushTempFolder}
-                  onSaveSettings={() => appSettingsState.saveSettings()}
-                />
+                  onSaveSettings={() => appSettingsState.saveSettings()} />
+
               </TabsContent>
 
               <TabsContent value="must" className="settings-tab-content">
+
                 <MustHaveSettings
                   tools={tools}
                   tab={settingsState.mustHaveTab}
@@ -123,11 +155,12 @@ export function SettingsDialog({
                   onDeleteImageMagick={toolManagement.deleteImageMagick}
                   onUpdateMiniforge={toolManagement.updateMiniforge}
                   onChooseRuntimeFolder={filePickers.chooseRuntimeFolder}
-                  onOpenExternalDownload={appSettingsState.openExternalDownload}
-                />
+                  onOpenExternalDownload={appSettingsState.openExternalDownload} />
+
               </TabsContent>
 
               <TabsContent value="video" className="settings-tab-content">
+
                 <VideoSettings
                   tools={tools}
                   tab={settingsState.modelTab}
@@ -143,10 +176,16 @@ export function SettingsDialog({
                   isUpdatingEsrgan={toolManagement.isUpdatingEsrgan}
                   isUpdatingRife={toolManagement.isUpdatingRife}
                   isUpdatingFaceFusion={toolManagement.isUpdatingFaceFusion}
+                  isUpdatingWan21={toolManagement.isUpdatingWan21}
+                  isUpdatingWan22={toolManagement.isUpdatingWan22}
                   hasRealEsrganUpdate={updateAvailability.realesrgan}
                   hasRifeUpdate={updateAvailability.rife}
                   hasFaceFusionUpdate={updateAvailability.facefusion}
+                  hasWan21Update={updateAvailability.wan21}
+                  hasWan22Update={updateAvailability.wan22}
                   faceFusionStatus={faceFusionStatus}
+                  wan21Status={wan21Status}
+                  wan22Status={wan22Status}
                   availableFaceFusionProviders={derivedState.availableFaceFusionProviders}
                   faceFusionRuntime={videoForm.faceFusionRuntime}
                   storageFor={derivedState.storageFor}
@@ -158,21 +197,27 @@ export function SettingsDialog({
                   onUpdateRife={toolManagement.updateRife}
                   onOpenModelInstall={modelInstall.openModelInstall}
                   onUpdateFaceFusion={toolManagement.updateFaceFusion}
-                  onSetFaceFusionRuntime={videoForm.setFaceFusionRuntime}
-                />
+                  onUpdateWan21={toolManagement.updateWan21}
+                  onDeleteWan21={toolManagement.deleteWan21}
+                  onUpdateWan22={toolManagement.updateWan22}
+                  onDeleteWan22={toolManagement.deleteWan22}
+                  onSetFaceFusionRuntime={videoForm.setFaceFusionRuntime} />
+
               </TabsContent>
 
               <TabsContent value="image" className="settings-tab-content">
+
                 <ImageModelSettings
+                  vosrSettings={<VosrSettings status={toolState.vosrStatus}
+                    installing={toolManagement.isInstallingVosr}
+                    onInstall={toolManagement.installVosr}
+                    onCancel={() => { void invoke("cancel_vosr").catch(() => {}); }} />}
                   tools={tools}
                   tab={settingsState.modelTab}
                   expandedTool={settingsState.expandedTool}
-                  supirStatus={supirStatus}
-                  supirModels={supirModels}
-                  isUpdatingSupir={toolManagement.isUpdatingSupir}
-                  isUpdatingSupirXformers={toolManagement.isUpdatingSupirXformers}
-                  hasSupirUpdate={updateAvailability.supir}
-                  hasSupirXformersUpdate={updateAvailability.supirXformers}
+                  flux2Status={flux2Status}
+                  isUpdatingFlux2={toolManagement.isUpdatingFlux2}
+                  hasFlux2Update={updateAvailability.flux2}
                   updatingImageCodecTool={toolManagement.updatingImageCodecTool}
                   imageCodecUpdates={{
                     oxipng: updateAvailability.oxipng,
@@ -180,26 +225,24 @@ export function SettingsDialog({
                     libwebp: updateAvailability.libwebp,
                     mozjpeg: updateAvailability.mozjpeg,
                   }}
-                  activeSupirCheckpoint={toolManagement.activeSupirCheckpoint}
                   storageFor={derivedState.storageFor}
                   onSelectTab={settingsState.selectModelTab}
                   onSetExpandedTool={settingsState.setExpandedTool}
-                  onUpdateSupir={toolManagement.updateSupir}
-                  onUpdateSupirXformers={toolManagement.updateSupirXformers}
+                  onUpdateFlux2={toolManagement.updateFlux2}
                   onUpdateImageCodecTool={toolManagement.updateImageCodecTool}
-                  onDeleteImageCodecTool={toolManagement.deleteImageCodecTool}
-                  onDeleteSupirXformers={toolManagement.deleteSupirXformers}
-                  onImportSupirCheckpoint={toolManagement.importSupirCheckpoint}
-                  onImportSupirCheckpointFromDownloads={toolManagement.importSupirCheckpointFromDownloads}
-                  onDownloadSupirCheckpoint={toolManagement.downloadSupirCheckpoint}
-                  onDeleteSupirCheckpoint={toolManagement.deleteSupirCheckpoint}
-                />
+                  onDeleteImageCodecTool={toolManagement.deleteImageCodecTool} />
+
               </TabsContent>
 
+              <TabsContent value="fonts" className="settings-tab-content"><SubtitleFontSettings tools={transcription} /></TabsContent>
               <TabsContent value="audio" className="settings-tab-content">
-                <ModelPlaceholderSettings title="Audio" tab={settingsState.modelTab} onSelectTab={settingsState.selectModelTab} />
+
+                <ModelPlaceholderSettings title="Audio" tab={settingsState.modelTab} onSelectTab={settingsState.selectModelTab}
+                  editing={<><AudioModelSettings audioModels={audioModels} /><TranscriptionTools tools={transcription} installationOnly /></>} />
+
               </TabsContent>
             </div>
+            </ToolCheckContext.Provider>
           </ScrollArea>
         </Tabs>
       </DialogContent>

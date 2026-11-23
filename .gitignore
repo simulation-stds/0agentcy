@@ -63,14 +63,9 @@ conda-meta/
 *.db-shm
 *.db-wal
 
-# Graphify generated cache and transient files. Keep reviewed graph outputs only when useful.
-graphify-out/cache/
-graphify-out/memory/
-graphify-out/*.tmp
-graphify-out/cost*
-graphify-out/manifest*
-graphify-out/.graphify_semantic_marker
-graphify-out/20??-??-??/
+# Graphify state belongs to each local checkout.
+graphify-out/
+graphify-out-windows/
 .graphify_*.json
 .graphify_*.txt
 
@@ -81,3 +76,23 @@ desktop.ini
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# Machine-local shared Python runtime configuration
+shared-runtimes.local.json
+
+# Task checkouts and machine-local evidence.
+/worktrees/
+/profiles/*.local.json
+/private-test-evidence/
+/design/screenshots/
+
+# Local Python environments and generated coverage.
+/.graphify-venv/
+/.comparison-venv/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+
+# Editable identity source retained locally pending asset review.
+/Identity/Artboard-1.vectorcraft

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Launch Videomaxxing
+Exec=python3 -c "import os,sys; os.execv('/bin/bash', ['bash', os.path.join(os.path.dirname(sys.argv[1]), 'run_app.sh')])" %k
+Icon=applications-multimedia
+Terminal=true
+Categories=AudioVideo;

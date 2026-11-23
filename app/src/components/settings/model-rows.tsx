@@ -1,5 +1,6 @@
 import { IconButton } from "@/components/app-controls";
 import type { ModelSettingsRow, ModelTool } from "@/lib/app-options";
+import { Download, Trash2 } from "lucide-react";
 
 type ModelRowsProps = {
   tool: ModelTool;
@@ -38,7 +39,7 @@ export function ModelRows({
               title={installed ? `Remove ${candidate.name}` : candidate.known ? `Download ${candidate.name}` : "Local model cannot be downloaded by this installer"}
               onClick={() => (installed ? onDeleteModel(tool, candidate.name) : onDownloadModel([candidate.name]))}
             >
-              <span className="material-symbols-rounded" aria-hidden="true">{installed ? "delete" : "download"}</span>
+              {installed ? <Trash2 className="app-icon" /> : <Download className="app-icon" />}
             </IconButton>
           </div>
         );

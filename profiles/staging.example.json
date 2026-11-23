@@ -1,0 +1,5 @@
+{
+  "defaultDownloadFolder": "output/staging",
+  "tempFolder": "temp/staging",
+  "playNotifications": false
+}

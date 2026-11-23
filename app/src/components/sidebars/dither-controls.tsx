@@ -2,11 +2,21 @@ import { ColorControl, FormRow, RangeControl, SelectControl, SwitchRow, type Sel
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { defaultDitherSettings, type DitherAlgorithm, type DitherSettings } from "@/lib/app-options";
+import { Crop, Palette, RectangleHorizontal, RectangleVertical, Square, WandSparkles, type LucideIcon } from "lucide-react";
 
 type AspectRatioOption = {
   value: string;
   label: string;
   icon: string;
+};
+
+const aspectRatioIcons: Record<string, LucideIcon> = {
+  image_aspect_ratio: Crop,
+  crop_square: Square,
+  aspect_ratio: Crop,
+  crop_portrait: RectangleVertical,
+  crop_16_9: RectangleHorizontal,
+  panorama_wide_angle: RectangleHorizontal,
 };
 
 export function DitherControls({
@@ -42,19 +52,23 @@ export function DitherControls({
           </FormRow>
           <FormRow label="Aspect ratio" help="Locks output height from the width. Original uses the source image aspect ratio.">
             <div className="ratio-options" role="radiogroup" aria-label="Aspect ratio">
-              {aspectRatios.map((item) => (
-                <Button
-                  key={item.value}
-                  type="button"
-                  className={ditherAspectRatio === item.value ? "active" : ""}
-                  onClick={() => onUpdateDitherAspectRatio(item.value)}
-                  aria-label={item.label}
-                  aria-pressed={ditherAspectRatio === item.value}
-                >
-                  <span className="material-symbols-rounded" aria-hidden="true">{item.icon}</span>
-                  {item.label}
-                </Button>
-              ))}
+              {aspectRatios.map((item) => {
+                const AspectIcon = aspectRatioIcons[item.icon] ?? Crop;
+
+                return (
+                  <Button
+                    key={item.value}
+                    type="button"
+                    className={ditherAspectRatio === item.value ? "active" : ""}
+                    onClick={() => onUpdateDitherAspectRatio(item.value)}
+                    aria-label={item.label}
+                    aria-pressed={ditherAspectRatio === item.value}
+                  >
+                    <AspectIcon className="app-icon" />
+                    {item.label}
+                  </Button>
+                );
+              })}
             </div>
           </FormRow>
           <FormRow label="Output width" help="Output PNG width in pixels. If an aspect ratio is selected, height updates automatically.">
@@ -69,8 +83,7 @@ export function DitherControls({
         ditherSettings={ditherSettings}
         ditherAlgorithms={ditherAlgorithms}
         ditherAlgorithmHelp={ditherAlgorithmHelp}
-        onUpdateDitherSettings={onUpdateDitherSettings}
-      />
+        onUpdateDitherSettings={onUpdateDitherSettings} />
     </>
   );
 }
@@ -86,11 +99,11 @@ function DitherColorModeControls({
     <>
       <div className="dither-mode-switch" role="radiogroup" aria-label="Dither color mode">
         <Button type="button" className={!ditherSettings.usePalette ? "active" : ""} onClick={() => onUpdateDitherSettings({ usePalette: false })} aria-pressed={!ditherSettings.usePalette}>
-          <span className="material-symbols-rounded" aria-hidden="true">palette</span>
+          <Palette className="app-icon" />
           Source Colors
         </Button>
         <Button type="button" className={ditherSettings.usePalette ? "active" : ""} onClick={() => onUpdateDitherSettings({ usePalette: true })} aria-pressed={ditherSettings.usePalette}>
-          <span className="material-symbols-rounded" aria-hidden="true">format_color_fill</span>
+          <WandSparkles className="app-icon" />
           Palette
         </Button>
       </div>
@@ -103,20 +116,17 @@ function DitherColorModeControls({
               label="Shadow"
               help="Darkest color used by the dither palette."
               value={ditherSettings.shadowColor}
-              onChange={(value) => onUpdateDitherSettings({ shadowColor: value })}
-            />
+              onChange={(value) => onUpdateDitherSettings({ shadowColor: value })} />
             <ColorControl
               label="Mid"
               help="Middle color used by the dither palette."
               value={ditherSettings.midColor}
-              onChange={(value) => onUpdateDitherSettings({ midColor: value })}
-            />
+              onChange={(value) => onUpdateDitherSettings({ midColor: value })} />
             <ColorControl
               label="Highlight"
               help="Lightest color used by the dither palette."
               value={ditherSettings.highlightColor}
-              onChange={(value) => onUpdateDitherSettings({ highlightColor: value })}
-            />
+              onChange={(value) => onUpdateDitherSettings({ highlightColor: value })} />
             <SwitchRow
               checked={ditherSettings.invertPalette}
               onCheckedChange={(checked) => onUpdateDitherSettings({ invertPalette: checked })}
@@ -190,8 +200,7 @@ function DitherLookControls({
               step="1"
               value={halftoneAngle}
               displayValue={`${halftoneAngle}deg`}
-              onChange={(value) => onUpdateDitherSettings({ halftoneAngle: Number(value) })}
-            />
+              onChange={(value) => onUpdateDitherSettings({ halftoneAngle: Number(value) })} />
             <FormRow label="Dot shape" help="Changes the threshold shape inside each halftone cell. Round is classic; diamond and line are more graphic.">
               <SelectControl value={halftoneShape} onChange={(value) => onUpdateDitherSettings({ halftoneShape: value as DitherSettings["halftoneShape"] })} options={[
                 { value: "round", label: "Round" },
@@ -211,8 +220,7 @@ function DitherLookControls({
               step="1"
               value={noiseScale}
               displayValue={`${noiseScale}px`}
-              onChange={(value) => onUpdateDitherSettings({ noiseScale: Number(value) })}
-            />
+              onChange={(value) => onUpdateDitherSettings({ noiseScale: Number(value) })} />
             <RangeControl
               label="Noise seed"
               help="Changes the deterministic noise pattern without changing the rest of the look."
@@ -221,8 +229,7 @@ function DitherLookControls({
               step="1"
               value={noiseSeed}
               displayValue={noiseSeed}
-              onChange={(value) => onUpdateDitherSettings({ noiseSeed: Number(value) })}
-            />
+              onChange={(value) => onUpdateDitherSettings({ noiseSeed: Number(value) })} />
           </>
         )}
         <RangeControl
@@ -233,8 +240,7 @@ function DitherLookControls({
           step="1"
           value={ditherSettings.pixelScale}
           displayValue={`${ditherSettings.pixelScale}x`}
-          onChange={(value) => onUpdateDitherSettings({ pixelScale: Number(value) })}
-        />
+          onChange={(value) => onUpdateDitherSettings({ pixelScale: Number(value) })} />
         <RangeControl label={strengthLabel} help={strengthHelp} min="0" max="1" step="0.01" value={ditherSettings.ditherStrength} displayValue={ditherSettings.ditherStrength.toFixed(2)} onChange={(value) => onUpdateDitherSettings({ ditherStrength: Number(value) })} />
         <RangeControl label="Posterize levels" help="Number of luminance steps before palette mapping. Lower creates flatter posterized bands." min="2" max="16" step="1" value={ditherSettings.posterizeLevels} displayValue={ditherSettings.posterizeLevels} onChange={(value) => onUpdateDitherSettings({ posterizeLevels: Number(value) })} />
         <RangeControl label="Black point" help="Input luminance value that maps to the darkest palette color." min="0" max="0.95" step="0.01" value={ditherSettings.blackPoint} displayValue={ditherSettings.blackPoint.toFixed(2)} onChange={(value) => onUpdateDitherSettings({ blackPoint: Number(value) })} />

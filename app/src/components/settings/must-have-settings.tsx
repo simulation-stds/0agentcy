@@ -1,6 +1,7 @@
 import { MustHaveEnvironmentsSection, MustHaveGpuSection, MustHaveToolsSection } from "@/components/settings/must-have-sections";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { FaceFusionStatus, ToolStatus, ToolStorage } from "@/hooks/use-tool-state";
+import { Box, MonitorCog, RefreshCw } from "lucide-react";
 
 type MustHaveSettingsProps = {
   tools: ToolStatus | null;
@@ -75,15 +76,15 @@ export function MustHaveSettings({
       <Tabs value={tab} onValueChange={(value) => onSelectTab(value as "tools" | "environments" | "gpu")} className="settings-inner-tabs-wrap">
         <TabsList variant="line" className="settings-inner-tabs" aria-label="Must haves sections">
           <TabsTrigger value="tools">
-            <span className="material-symbols-rounded" aria-hidden="true">deployed_code</span>
+            <Box className="app-icon" />
             Tools
           </TabsTrigger>
           <TabsTrigger value="environments">
-            <span className="material-symbols-rounded" aria-hidden="true">sync_alt</span>
+            <RefreshCw className="app-icon" />
             Environments
           </TabsTrigger>
           <TabsTrigger value="gpu">
-            <span className="material-symbols-rounded" aria-hidden="true">developer_board</span>
+            <MonitorCog className="app-icon" />
             GPU Processing
           </TabsTrigger>
         </TabsList>
@@ -100,8 +101,7 @@ export function MustHaveSettings({
             onSetExpandedTool={onSetExpandedTool}
             onUpdateFfmpeg={onUpdateFfmpeg}
             onUpdateImageMagick={onUpdateImageMagick}
-            onDeleteImageMagick={onDeleteImageMagick}
-          />
+            onDeleteImageMagick={onDeleteImageMagick} />
         </TabsContent>
 
         <TabsContent value="environments" className="settings-tab-content">
@@ -115,8 +115,7 @@ export function MustHaveSettings({
             storageFor={storageFor}
             onSetExpandedTool={onSetExpandedTool}
             onUpdateMiniforge={onUpdateMiniforge}
-            onOpenExternalDownload={onOpenExternalDownload}
-          />
+            onOpenExternalDownload={onOpenExternalDownload} />
         </TabsContent>
 
         <TabsContent value="gpu" className="settings-tab-content">
@@ -135,8 +134,7 @@ export function MustHaveSettings({
             cudnnDownloadUrl={cudnnDownloadUrl}
             onSetExpandedTool={onSetExpandedTool}
             onChooseRuntimeFolder={onChooseRuntimeFolder}
-            onOpenExternalDownload={onOpenExternalDownload}
-          />
+            onOpenExternalDownload={onOpenExternalDownload} />
         </TabsContent>
       </Tabs>
     </>

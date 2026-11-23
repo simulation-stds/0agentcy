@@ -64,7 +64,6 @@ export function useVideoWorkspaceController({
     duration: videoMetrics.duration,
     previewStart: videoMedia.previewStart,
     previewEnd: videoMedia.previewEnd,
-    selectedDuration: videoMetrics.selectedDuration,
     trimStart: videoInteraction.trimStart,
     trimEnd: videoInteraction.trimEnd,
     currentTime: videoMedia.currentTime,
@@ -103,6 +102,8 @@ export function useVideoWorkspaceController({
     preferredModelDevice: appSettings.preferredModelDevice,
     devices: toolState.devices,
     faceFusionSourcePath: filePickers.faceFusionSourcePath,
+    wan22ReferencePath: filePickers.wan22ReferencePath,
+    onVideoOutput: videoMedia.loadVideo,
     appendLog,
     resetJobProgress,
   });

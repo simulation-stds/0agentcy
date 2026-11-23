@@ -1,5 +1,6 @@
 import { SecondaryButton } from "@/components/app-controls";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ClipboardList, Film, Image, Music, RefreshCw, SlidersHorizontal } from "lucide-react";
 
 type SettingsSidebarProps = {
   onCheckUpdates: () => void;
@@ -10,28 +11,29 @@ export function SettingsSidebar({ onCheckUpdates }: SettingsSidebarProps) {
     <div className="settings-sidebar">
       <TabsList className="settings-tabs" aria-label="Settings sections">
         <TabsTrigger value="general">
-          <span className="material-symbols-rounded" aria-hidden="true">tune</span>
+          <SlidersHorizontal className="app-icon" />
           General
         </TabsTrigger>
         <TabsTrigger value="must">
-          <span className="material-symbols-rounded" aria-hidden="true">inventory_2</span>
+          <ClipboardList className="app-icon" />
           Must haves
         </TabsTrigger>
         <TabsTrigger value="video">
-          <span className="material-symbols-rounded" aria-hidden="true">movie</span>
+          <Film className="app-icon" />
           Video
         </TabsTrigger>
         <TabsTrigger value="image">
-          <span className="material-symbols-rounded" aria-hidden="true">image</span>
+          <Image className="app-icon" />
           Image
         </TabsTrigger>
+        <TabsTrigger value="fonts">Fonts</TabsTrigger>
         <TabsTrigger value="audio">
-          <span className="material-symbols-rounded" aria-hidden="true">music_note</span>
+          <Music className="app-icon" />
           Audio
         </TabsTrigger>
       </TabsList>
       <SecondaryButton className="settings-check-button" onClick={onCheckUpdates}>
-        <span className="material-symbols-rounded" aria-hidden="true">refresh</span>
+        <RefreshCw className="app-icon" />
         Check Updates
       </SecondaryButton>
     </div>

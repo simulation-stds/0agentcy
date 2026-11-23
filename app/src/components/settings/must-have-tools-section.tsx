@@ -1,6 +1,7 @@
 import { PrimaryButton, SecondaryButton, SettingsSection, StatusBadge, ToolAccordionItem } from "@/components/app-controls";
 import { Accordion } from "@/components/ui/accordion";
 import type { ToolStatus, ToolStorage } from "@/hooks/use-tool-state";
+import { Download, Folder, RefreshCw, Trash2 } from "lucide-react";
 
 type MustHaveToolsSectionProps = {
   tools: ToolStatus | null;
@@ -53,16 +54,16 @@ export function MustHaveToolsSection({
         >
           <p>FFmpeg includes ffmpeg.exe and ffprobe.exe. The app uses FFmpeg for processing and FFprobe for metadata.</p>
           <div className="tool-dropdown-info">
-            <code title={tools?.ffmpeg || "D:/W2DS/Tools/videomaxxxing/tools/ffmpeg"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{tools?.ffmpeg || "D:/W2DS/Tools/videomaxxxing/tools/ffmpeg"}</code>
+            <code title={tools?.ffmpeg || "D:/W2DS/Tools/videomaxxxing/tools/ffmpeg"}><Folder className="app-icon" />{tools?.ffmpeg || "D:/W2DS/Tools/videomaxxxing/tools/ffmpeg"}</code>
           </div>
           <div className="tool-dropdown-actions">
             {ffmpegInstalled && hasFfmpegUpdate && (
-              <SecondaryButton disabled={isUpdatingFfmpeg} onClick={onUpdateFfmpeg}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update</SecondaryButton>
+              <SecondaryButton disabled={isUpdatingFfmpeg} onClick={onUpdateFfmpeg}><RefreshCw className="app-icon" />Update</SecondaryButton>
             )}
             {ffmpegInstalled ? (
-              <SecondaryButton disabled><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall</SecondaryButton>
+              <SecondaryButton disabled><Trash2 className="app-icon" />Uninstall</SecondaryButton>
             ) : (
-              <PrimaryButton disabled={isUpdatingFfmpeg} onClick={onUpdateFfmpeg}><span className="material-symbols-rounded" aria-hidden="true">download</span>Download</PrimaryButton>
+              <PrimaryButton disabled={isUpdatingFfmpeg} onClick={onUpdateFfmpeg}><Download className="app-icon" />Download</PrimaryButton>
             )}
           </div>
         </ToolAccordionItem>
@@ -83,17 +84,17 @@ export function MustHaveToolsSection({
         >
           <p>ImageMagick provides the default still-image compressor and converter. Advanced codec tools override it when they are installed.</p>
           <div className="tool-dropdown-info">
-            <code title={imageMagickPath || "D:/W2DS/Tools/videomaxxxing/tools/imagemagick"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{imageMagickPath || "D:/W2DS/Tools/videomaxxxing/tools/imagemagick"}</code>
+            <code title={imageMagickPath || "D:/W2DS/Tools/videomaxxxing/tools/imagemagick"}><Folder className="app-icon" />{imageMagickPath || "D:/W2DS/Tools/videomaxxxing/tools/imagemagick"}</code>
           </div>
           <div className="tool-dropdown-actions">
             {!imageMagickAvailable && (
-              <PrimaryButton disabled={isUpdatingImageMagick} onClick={onUpdateImageMagick}><span className="material-symbols-rounded" aria-hidden="true">download</span>Download</PrimaryButton>
+              <PrimaryButton disabled={isUpdatingImageMagick} onClick={onUpdateImageMagick}><Download className="app-icon" />Download</PrimaryButton>
             )}
             {imageMagickManaged && hasImageMagickUpdate && (
-              <SecondaryButton disabled={isUpdatingImageMagick} onClick={onUpdateImageMagick}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update</SecondaryButton>
+              <SecondaryButton disabled={isUpdatingImageMagick} onClick={onUpdateImageMagick}><RefreshCw className="app-icon" />Update</SecondaryButton>
             )}
             {imageMagickManaged && (
-              <SecondaryButton disabled={isUpdatingImageMagick} onClick={onDeleteImageMagick}><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall</SecondaryButton>
+              <SecondaryButton disabled={isUpdatingImageMagick} onClick={onDeleteImageMagick}><Trash2 className="app-icon" />Uninstall</SecondaryButton>
             )}
           </div>
         </ToolAccordionItem>

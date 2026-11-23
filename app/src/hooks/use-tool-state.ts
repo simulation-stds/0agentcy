@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { ToolCheckCache } from "@/lib/tool-check-cache";
+import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 export type ToolStatus = {
@@ -7,10 +8,15 @@ export type ToolStatus = {
   realesrgan: string | null;
   rife: string | null;
   supir: string | null;
+  vosr: string | null;
+  flux2: string | null;
+  wan21: string | null;
+  wan22: string | null;
   facefusion: string | null;
   git: string | null;
   conda: string | null;
   cudnn: string | null;
+  windowsDeveloperMode: string | null;
   imagemagick: string | null;
   oxipng: string | null;
   libavif: string | null;
@@ -76,7 +82,22 @@ export type FaceFusionStatus = {
   message: string;
 };
 
+export type VosrDevice = { id: string; name: string };
+
+export type VosrStatus = {
+  cudaDevices: VosrDevice[];
+  state: "missing" | "needs_setup" | "installed";
+  path: string;
+  environmentPath: string;
+  modelPath: string;
+  runtimeReady: boolean;
+  modelsReady: boolean;
+  cudaReady: boolean;
+  message: string;
+};
+
 export type SupirStatus = {
+  cudaDevices: VosrDevice[] | null;
   state: "missing" | "needs_setup" | "installed";
   repoPath: string;
   envName: string;
@@ -91,6 +112,70 @@ export type SupirStatus = {
   message: string;
 };
 
+export type Flux2Status = {
+  state: "missing" | "needs_setup" | "installed";
+  toolPath: string;
+  envName: string;
+  cachePath: string;
+  currentSizeLabel: string;
+  estimatedInstallLabel: string;
+  runtimeReady: boolean;
+  cudaReady: boolean;
+  cudaLabel: string;
+  torchVersion: string;
+  diffusersVersion: string;
+  transformersVersion: string;
+  accelerateVersion: string;
+  message: string;
+};
+
+export type Wan22Status = {
+  state: "missing" | "needs_setup" | "installed";
+  toolPath: string;
+  repoPath: string;
+  modelPath: string;
+  cachePath: string;
+  envName: string;
+  currentSizeLabel: string;
+  estimatedInstallLabel: string;
+  runtimeReady: boolean;
+  modelReady: boolean;
+  cudaReady: boolean;
+  cudaLabel: string;
+  torchVersion: string;
+  transformersVersion: string;
+  diffusersVersion: string;
+  accelerateVersion: string;
+  flashAttnReady: boolean;
+  flashAttnMessage: string;
+  message: string;
+};
+
+export type Wan21Status = {
+  state: "missing" | "needs_setup" | "installed";
+  toolPath: string;
+  repoPath: string;
+  modelPath: string;
+  cachePath: string;
+  envName: string;
+  currentSizeLabel: string;
+  estimatedInstallLabel: string;
+  runtimeReady: boolean;
+  modelReady: boolean;
+  cudaReady: boolean;
+  cudaLabel: string;
+  torchVersion: string;
+  transformersVersion: string;
+  diffusersVersion: string;
+  accelerateVersion: string;
+  flashAttnReady: boolean;
+  flashAttnMessage: string;
+  message: string;
+};
+
+export type ToolKey = keyof ToolStatus | "devices";
+export type CheckState = "checking" | "checked" | "failed";
+
 type UseToolStateArgs = {
   appendLog: (message: string) => void;
 };
@@ -101,62 +186,64 @@ export function useToolState({ appendLog }: UseToolStateArgs) {
   const [rifeModels, setRifeModels] = useState<RifeModel[]>([]);
   const [supirModels, setSupirModels] = useState<SupirModel[]>([]);
   const [faceFusionStatus, setFaceFusionStatus] = useState<FaceFusionStatus | null>(null);
+  const [vosrStatus, setVosrStatus] = useState<VosrStatus | null>(null);
   const [supirStatus, setSupirStatus] = useState<SupirStatus | null>(null);
+  const [flux2Status, setFlux2Status] = useState<Flux2Status | null>(null);
+  const [wan21Status, setWan21Status] = useState<Wan21Status | null>(null);
+  const [wan22Status, setWan22Status] = useState<Wan22Status | null>(null);
   const [toolStorage, setToolStorage] = useState<ToolStorage[]>([]);
   const [devices, setDevices] = useState<RealEsrganDevice[]>([]);
 
-  async function refreshToolState() {
-    try {
-      setTools(await invoke<ToolStatus>("detect_tools"));
-    } catch (error) {
-      appendLog(`Tool detection failed: ${String(error)}`);
-    }
+  const cache = useRef(new ToolCheckCache());
+  const logRef = useRef(appendLog);
+  logRef.current = appendLog;
+  const [checks, setChecks] = useState<Record<string, CheckState>>({});
 
+  const ensureTool = useCallback(async (tool: ToolKey, force = false) => {
     try {
-      const items = await invoke<RealEsrganModel[]>("list_realesrgan_models");
-      setModels(items);
-    } catch (error) {
-      appendLog(`Real-ESRGAN model scan failed: ${String(error)}`);
+      await cache.current.run(tool, async () => {
+        setChecks(previous => ({ ...previous, [tool]: "checking" }));
+        logRef.current(`Checking ${tool}...`);
+        try {
+          const result = await invoke<{ path: string | null; models?: unknown; status?: unknown; devices?: RealEsrganDevice[] }>("probe_tool", { tool });
+          if (tool === "devices") setDevices(result.devices || []);
+          else setTools(previous => ({ ...previous, [tool]: result.path ?? null } as ToolStatus));
+          if (tool === "realesrgan") setModels(result.models as RealEsrganModel[]);
+          if (tool === "rife") setRifeModels(result.models as RifeModel[]);
+          if (tool === "supir") { setSupirModels(result.models as SupirModel[]); setSupirStatus(result.status as SupirStatus); }
+          if (tool === "facefusion") setFaceFusionStatus(result.status as FaceFusionStatus);
+          if (tool === "vosr") setVosrStatus(result.status as VosrStatus);
+          if (tool === "flux2") setFlux2Status(result.status as Flux2Status);
+          if (tool === "wan21") setWan21Status(result.status as Wan21Status);
+          if (tool === "wan22") setWan22Status(result.status as Wan22Status);
+          setChecks(previous => ({ ...previous, [tool]: "checked" }));
+        } catch (error) {
+          setChecks(previous => ({ ...previous, [tool]: "failed" }));
+          logRef.current(`${tool} check failed: ${String(error)}`);
+          throw error;
+        }
+      }, force);
+    } catch {
+      // The probe records its own failure even when several callers share it.
     }
+  }, []);
 
+  const ensureStorage = useCallback(async (tool: string, force = false) => {
     try {
-      const items = await invoke<RifeModel[]>("list_rife_models");
-      setRifeModels(items);
-    } catch (error) {
-      appendLog(`RIFE model scan failed: ${String(error)}`);
-    }
+      await cache.current.run(`storage:${tool}`, async () => {
+        const items = await invoke<ToolStorage[]>("probe_tool_storage", { tool });
+        setToolStorage(previous => [...previous.filter(item => item.key !== tool), ...items]);
+      }, force);
+    } catch (error) { logRef.current(`Storage check failed: ${String(error)}`); }
+  }, []);
 
-    try {
-      const items = await invoke<SupirModel[]>("list_supir_models");
-      setSupirModels(items);
-    } catch (error) {
-      appendLog(`SUPIR model scan failed: ${String(error)}`);
-    }
-
-    try {
-      setFaceFusionStatus(await invoke<FaceFusionStatus>("detect_facefusion"));
-    } catch (error) {
-      appendLog(`FaceFusion scan failed: ${String(error)}`);
-    }
-
-    try {
-      setSupirStatus(await invoke<SupirStatus>("detect_supir"));
-    } catch (error) {
-      appendLog(`SUPIR scan failed: ${String(error)}`);
-    }
-
-    try {
-      setDevices(await invoke<RealEsrganDevice[]>("detect_realesrgan_devices"));
-    } catch (error) {
-      appendLog(`GPU detection failed: ${String(error)}`);
-    }
-
-    try {
-      setToolStorage(await invoke<ToolStorage[]>("get_tool_storage"));
-    } catch (error) {
-      appendLog(`Tool storage scan failed: ${String(error)}`);
-    }
-  }
+  // No argument refreshes only previously requested checks, never every installed runtime.
+  const refreshToolState = useCallback(async (affected?: ToolKey[]) => {
+    const keys = affected || cache.current.keys().filter(key => !key.startsWith("storage:")) as ToolKey[];
+    await Promise.all(keys.map(key => ensureTool(key, true)));
+    const storageKeys = affected ? affected.map(key => key === "conda" ? "miniforge" : key) : cache.current.keys().filter(key => key.startsWith("storage:")).map(key => key.slice(8));
+    await Promise.all(storageKeys.filter(key => cache.current.keys().includes(`storage:${key}`)).map(key => ensureStorage(key, true)));
+  }, [ensureTool, ensureStorage]);
 
   return {
     tools,
@@ -165,8 +252,15 @@ export function useToolState({ appendLog }: UseToolStateArgs) {
     supirModels,
     faceFusionStatus,
     supirStatus,
+    vosrStatus,
+    flux2Status,
+    wan21Status,
+    wan22Status,
     toolStorage,
     devices,
     refreshToolState,
+    ensureTool,
+    ensureStorage,
+    checks,
   };
 }

@@ -1,12 +1,21 @@
+import type { Transcription } from "@/hooks/use-transcription";
+import { SubtitleCaption } from "@/components/transcription-tools";
+import { AudioTimeRuler } from "@/components/previews/audio-time-ruler";
+import { AudioStemTracks } from "@/components/previews/audio-stem-tracks";
+import { drawWaveform } from "@/lib/audio-waveform";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import type { useAudioTools } from "@/hooks/use-audio-tools";
-import { formatTime } from "@/lib/media-utils";
+import { formatTime, getPreviewRangeState } from "@/lib/media-utils";
+import { FormRow, SelectControl, SwitchRow } from "@/components/app-controls";
+import { PreviewControls, PreviewRangeActions } from "@/components/previews/video-player-shell";
 
 type AudioPreviewProps = {
+  transcription: Transcription;
   audioTools: ReturnType<typeof useAudioTools>;
 };
 
-export function AudioPreview({ audioTools }: AudioPreviewProps) {
+export function AudioPreview({ transcription, audioTools }: AudioPreviewProps) {
+  const [speed, setSpeed] = useState(1);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const [dragKind, setDragKind] = useState<"start" | "end" | null>(null);
@@ -27,7 +36,7 @@ export function AudioPreview({ audioTools }: AudioPreviewProps) {
     if (!context) return;
     context.setTransform(scale, 0, 0, scale, 0, 0);
     drawWaveform(context, rect.width, rect.height, audioTools.peaks, audioTools.showSeparateChannels, visibleStart, visibleEnd, duration);
-  }, [audioTools.peaks, audioTools.showSeparateChannels, visibleStart, visibleEnd, duration]);
+  }, [audioTools.peaks, audioTools.showSeparateChannels, audioTools.modelOutputs.length, visibleStart, visibleEnd, duration]);
 
   const trimStartPercent = visiblePercent(audioTools.trimStart, visibleStart, visibleDuration);
   const trimEndPercent = visiblePercent(audioTools.trimEnd || duration, visibleStart, visibleDuration);
@@ -91,85 +100,74 @@ export function AudioPreview({ audioTools }: AudioPreviewProps) {
     audioTools.seekTo(time);
   }
 
+  useEffect(() => {
+    if (audioTools.audioRef.current) audioTools.audioRef.current.playbackRate = speed;
+  }, [audioTools.audioRef, audioTools.audioSrc, audioTools.modelOutputs.length, speed]);
+
   const selectedDuration = Math.max(0, (audioTools.trimEnd || duration) - audioTools.trimStart);
 
   return (
     <section className="preview">
-      <h2>Preview</h2>
-      {audioTools.audioSrc ? (
+      {audioTools.modelOutputs.length ? (
+        <AudioStemTracks outputs={audioTools.modelOutputs} onCleanDialogue={audioTools.prepareVoiceCleanup}
+          key={audioTools.modelOutputs[0].path} speed={speed} onSpeedChange={setSpeed}
+          renderSettings={(onChange) => <AudioPlaybackSpeed value={speed} onChange={onChange} />} />
+      ) : audioTools.audioSrc ? (
         <>
           <div className="audio-preview-shell">
-            <div
-              ref={timelineRef}
-              className="audio-waveform"
-              onPointerMove={updateWaveformHover}
-              onPointerLeave={clearWaveformHover}
-              onPointerDown={scrubWaveform}
-            >
-              <canvas ref={canvasRef} />
-              <div className="audio-selection" style={{ left: `${trimStartPercent}%`, width: `${Math.max(0, trimEndPercent - trimStartPercent)}%` }} />
-              {hoverPercent !== null && (
-                <>
-                  <div className="hover-line" style={{ left: `${hoverPercent}%` }} />
-                  <div className="timeline-hover" style={{ left: `${hoverPercent}%` }}>
-                    {formatTime(hoverTime ?? 0)}
-                  </div>
-                </>
-              )}
-              <button
-                className="trim-handle trim-handle-start"
-                style={{ left: `${trimStartPercent}%` }}
-                onPointerDown={(event) => startTrimDrag("start", event)}
-                onPointerMove={updateTrimDrag}
-                onPointerUp={stopTrimDrag}
-                onPointerCancel={stopTrimDrag}
-                aria-label="Drag trim start"
-              />
-              <button
-                className="trim-handle trim-handle-end"
-                style={{ left: `${trimEndPercent}%` }}
-                onPointerDown={(event) => startTrimDrag("end", event)}
-                onPointerMove={updateTrimDrag}
-                onPointerUp={stopTrimDrag}
-                onPointerCancel={stopTrimDrag}
-                aria-label="Drag trim end"
-              />
-              <div className="audio-playhead" style={{ left: `${playheadPercent}%` }} />
+            <AudioTimeRuler start={visibleStart} end={visibleEnd} hoverTime={hoverTime}
+              onPointerMove={updateWaveformHover} onPointerLeave={clearWaveformHover} onPointerDown={scrubWaveform} />
+            <div className="audio-player-shell">
+              <div
+                ref={timelineRef}
+                className="audio-waveform"
+                onPointerMove={updateWaveformHover}
+                onPointerLeave={clearWaveformHover}
+                onPointerDown={scrubWaveform}
+              >
+                <canvas ref={canvasRef} />
+                <div className="audio-selection" style={{ left: `${trimStartPercent}%`, width: `${Math.max(0, trimEndPercent - trimStartPercent)}%` }} />
+                {hoverPercent !== null && <div className="hover-line" style={{ left: `${hoverPercent}%` }} />}
+                <button
+                  className="trim-handle trim-handle-start"
+                  style={{ left: `${trimStartPercent}%` }}
+                  onPointerDown={(event) => startTrimDrag("start", event)}
+                  onPointerMove={updateTrimDrag}
+                  onPointerUp={stopTrimDrag}
+                  onPointerCancel={stopTrimDrag}
+                  aria-label="Drag trim start" />
+                <button
+                  className="trim-handle trim-handle-end"
+                  style={{ left: `${trimEndPercent}%` }}
+                  onPointerDown={(event) => startTrimDrag("end", event)}
+                  onPointerMove={updateTrimDrag}
+                  onPointerUp={stopTrimDrag}
+                  onPointerCancel={stopTrimDrag}
+                  aria-label="Drag trim end" />
+                <div className="audio-playhead" style={{ left: `${playheadPercent}%` }} />
+                <SubtitleCaption tools={transcription} />
+              </div>
+              <PreviewControls
+                ready={duration > 0} playing={audioTools.isPlaying} muted={audioTools.isMuted}
+                currentTime={audioTools.currentTime} duration={duration} formatTime={formatTime}
+                onTogglePlayback={audioTools.togglePlayback} onToggleMute={audioTools.toggleMute}
+                previewSettings={<AudioPreviewSettings audioTools={audioTools} speed={speed} onSpeedChange={setSpeed} />} />
             </div>
             <div className="selection-summary">
               <span>Selection: {formatTime(audioTools.trimStart)} - {formatTime(audioTools.trimEnd || duration)} ({formatTime(selectedDuration)})</span>
               <span>{audioTools.showSeparateChannels ? "Separate channels" : "Combined waveform"}</span>
             </div>
-            <div className="audio-controls">
-              <div className="video-control-left">
-                <button disabled={!audioTools.metadata} onClick={audioTools.togglePlayback} title={audioTools.isPlaying ? "Pause" : "Play"}>
-                  <span className="material-symbols-rounded" aria-hidden="true">
-                    {audioTools.isPlaying ? "pause" : "play_arrow"}
-                  </span>
-                </button>
-                <span className="video-timecode">{formatTime(audioTools.currentTime)} / {formatTime(duration)}</span>
-              </div>
-              <button disabled={!audioTools.metadata} onClick={audioTools.toggleMute} title={audioTools.isMuted ? "Unmute" : "Mute"}>
-                <span className="material-symbols-rounded" aria-hidden="true">
-                  {audioTools.isMuted ? "volume_off" : "volume_up"}
-                </span>
-              </button>
-            </div>
             <audio
               ref={audioTools.audioRef}
               src={audioTools.audioSrc}
               muted={audioTools.isMuted}
-              loop={audioTools.loopPlayback && !audioTools.playSelectionOnly}
+              loop={audioTools.loopPlayback && !audioTools.shouldPlaySelection}
+              onError={audioTools.handlePlaybackError}
               onTimeUpdate={(event) => audioTools.handleTimeUpdate(event.currentTarget.currentTime)}
               onPlay={() => audioTools.setIsPlaying(true)}
               onPause={() => audioTools.setIsPlaying(false)}
               onEnded={audioTools.handleEnded}
-              onLoadedMetadata={(event) => {
-                if (!audioTools.metadata) {
-                  audioTools.updateTrimEnd(event.currentTarget.duration || 0);
-                }
-              }}
-            />
+              onLoadedMetadata={(event) => audioTools.loadPlaybackMetadata(event.currentTarget)} />
           </div>
         </>
       ) : (
@@ -182,70 +180,56 @@ export function AudioPreview({ audioTools }: AudioPreviewProps) {
   );
 }
 
+function AudioPlaybackSpeed({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  return (
+    <FormRow label="Playback speed">
+      <SelectControl value={String(value)} onChange={(next) => onChange(Number(next))}
+        options={[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => ({ value: String(rate), label: `${rate}×` }))} />
+    </FormRow>
+  );
+}
+
+function AudioPreviewSettings({ audioTools, speed, onSpeedChange }: Pick<AudioPreviewProps, "audioTools"> & {
+  speed: number;
+  onSpeedChange: (speed: number) => void;
+}) {
+  const duration = audioTools.metadata?.duration ?? 0;
+  const { isPreviewFitted, canFitSelection } = getPreviewRangeState(
+    duration, audioTools.visibleStart, audioTools.visibleEnd, audioTools.trimStart, audioTools.trimEnd,
+  );
+  return (
+    <>
+      <AudioPlaybackSpeed value={speed} onChange={onSpeedChange} />
+      <PreviewRangeActions
+        medium="Audio" isFitted={isPreviewFitted} canFit={canFitSelection}
+        isLoading={audioTools.isLoading} ready={Boolean(audioTools.metadata)}
+        onFit={() => audioTools.setPreviewRange(audioTools.trimStart, audioTools.trimEnd)}
+        onShowFull={() => audioTools.setPreviewRange(0, duration)} />
+      <SwitchRow
+        checked={audioTools.playSelectionOnly}
+        onCheckedChange={audioTools.setPlaySelectionOnly}
+        help="Start playback within the selection and stop at the trim end."
+      >
+        Play selection only
+      </SwitchRow>
+      <SwitchRow
+        checked={audioTools.loopPlayback}
+        onCheckedChange={audioTools.setLoopPlayback}
+        help="When enabled, playback restarts automatically when the preview reaches the end of the selected range or full file."
+      >
+        Play on loop
+      </SwitchRow>
+      <SwitchRow
+        checked={audioTools.showSeparateChannels}
+        onCheckedChange={audioTools.setShowSeparateChannels}
+        help="Show each audio channel as its own stacked waveform instead of mixing them into one waveform."
+      >
+        Separate channels
+      </SwitchRow>
+    </>
+  );
+}
+
 function visiblePercent(time: number, visibleStart: number, visibleDuration: number) {
   return Math.max(0, Math.min(100, ((time - visibleStart) / visibleDuration) * 100));
-}
-
-function drawWaveform(
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  peaks: number[][],
-  separateChannels: boolean,
-  visibleStart: number,
-  visibleEnd: number,
-  duration: number,
-) {
-  context.clearRect(0, 0, width, height);
-  context.fillStyle = "#101312";
-  context.fillRect(0, 0, width, height);
-
-  if (!peaks.length) {
-    context.fillStyle = "#5d6a62";
-    context.font = "14px sans-serif";
-    context.fillText("Waveform unavailable", 16, height / 2);
-    return;
-  }
-
-  const channels = separateChannels ? peaks : [combinePeaks(peaks)];
-  const visibleChannels = channels.map((channel) => sliceVisiblePeaks(channel, visibleStart, visibleEnd, duration));
-  const gap = separateChannels && visibleChannels.length > 1 ? 8 : 0;
-  const laneHeight = (height - gap * (visibleChannels.length - 1)) / visibleChannels.length;
-  visibleChannels.forEach((channel, channelIndex) => {
-    const top = channelIndex * (laneHeight + gap);
-    const middle = top + laneHeight / 2;
-    const barWidth = Math.max(1, width / channel.length);
-    context.fillStyle = channelIndex % 2 === 0 ? "#a7f06b" : "#7fd7c5";
-    for (let index = 0; index < channel.length; index += 1) {
-      const peak = channel[index];
-      const barHeight = Math.max(1, peak * laneHeight * 0.82);
-      const x = index * barWidth;
-      context.fillRect(x, middle - barHeight / 2, Math.max(1, barWidth * 0.72), barHeight);
-    }
-    if (separateChannels && channels.length > 1) {
-      context.fillStyle = "#5d6a62";
-      context.font = "12px sans-serif";
-      context.fillText(`Ch ${channelIndex + 1}`, 10, top + 18);
-    }
-  });
-}
-
-function sliceVisiblePeaks(channel: number[], visibleStart: number, visibleEnd: number, duration: number) {
-  if (!duration || (visibleStart <= 0 && visibleEnd >= duration)) return channel;
-  const startIndex = Math.max(0, Math.floor((visibleStart / duration) * channel.length));
-  const endIndex = Math.min(channel.length, Math.ceil((visibleEnd / duration) * channel.length));
-  return channel.slice(startIndex, Math.max(startIndex + 1, endIndex));
-}
-
-function combinePeaks(peaks: number[][]) {
-  const length = Math.max(...peaks.map((channel) => channel.length), 0);
-  const combined: number[] = [];
-  for (let index = 0; index < length; index += 1) {
-    let value = 0;
-    for (const channel of peaks) {
-      value = Math.max(value, channel[index] ?? 0);
-    }
-    combined.push(value);
-  }
-  return combined;
 }

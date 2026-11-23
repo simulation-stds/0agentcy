@@ -1,8 +1,12 @@
+import { VosrControls } from "@/components/sidebars/vosr-controls";
+import { SkinMaskEditor } from "@/components/previews/skin-mask-editor";
+import { localAssetSrc } from "@/lib/media-utils";
 import { ImagePreview } from "@/components/previews/image-preview";
+import { GenerativePromptBox } from "@/components/generative-controls";
 import { ImageSidebar } from "@/components/sidebars/image-sidebar";
 import { LogPanel } from "@/components/log-panel";
 import type { useImageTools } from "@/hooks/use-image-tools";
-import type { RealEsrganDevice } from "@/hooks/use-tool-state";
+import type { RealEsrganDevice, VosrDevice } from "@/hooks/use-tool-state";
 import type { aspectRatios, ditherAlgorithms } from "@/lib/app-options";
 import { estimateImageEta } from "@/lib/eta";
 
@@ -11,9 +15,14 @@ type ImageWorkspaceProps = {
   aspectRatios: typeof aspectRatios;
   ditherAlgorithms: typeof ditherAlgorithms;
   ditherAlgorithmHelp: string;
+  vosrReady: boolean;
+  vosrMessage?: string;
+  vosrInstalling: boolean;
+  vosrDevices: VosrDevice[];
   devices: RealEsrganDevice[];
   preferredModelDevice: string;
   log: string[];
+  onRetryToolChecks?: () => void;
   jobProgress: number;
   jobStep: string;
 };
@@ -23,27 +32,28 @@ export function ImageWorkspace({
   aspectRatios,
   ditherAlgorithms,
   ditherAlgorithmHelp,
+  vosrReady,
+  vosrMessage,
+  vosrInstalling,
+  vosrDevices,
   devices,
   preferredModelDevice,
   log,
+  onRetryToolChecks,
   jobProgress,
   jobStep,
 }: ImageWorkspaceProps) {
   const eta = estimateImageEta({
     imageAction: imageTools.imageAction,
     dimensions: imageTools.imageDimensions,
-    supirModel: imageTools.supirModel,
-    supirPreset: imageTools.supirPreset,
-    supirDevice: imageTools.supirDevice,
-    supirUpscale: imageTools.supirUpscale,
-    supirUseLlava: imageTools.supirUseLlava,
-    preferredModelDevice,
-    devices,
   });
 
   return (
     <section className="workspace">
       <ImageSidebar
+        vosrControls={<VosrControls tools={imageTools} ready={vosrReady} setupMessage={vosrMessage} installing={vosrInstalling}
+          devices={vosrDevices} />}
+        vosrBusy={imageTools.isRunningVosr || imageTools.isEnhancingVosr || imageTools.isDetectingSkin}
         imageSrc={imageTools.imageSrc}
         imageName={imageTools.imageName}
         imagePath={imageTools.imagePath}
@@ -67,16 +77,22 @@ export function ImageWorkspace({
         aspectRatios={aspectRatios}
         paletteSettings={imageTools.paletteSettings}
         hasPaletteResult={Boolean(imageTools.paletteResult)}
-        supirModel={imageTools.supirModel}
-        supirPreset={imageTools.supirPreset}
-        supirDevice={imageTools.supirDevice}
-        supirUpscale={imageTools.supirUpscale}
-        supirUseLlava={imageTools.supirUseLlava}
-        isRunningSupir={imageTools.isRunningSupir}
+        flux2AspectOrientation={imageTools.flux2AspectOrientation}
+        flux2AspectRatio={imageTools.flux2AspectRatio}
+        flux2Width={imageTools.flux2Width}
+        flux2Height={imageTools.flux2Height}
+        flux2Steps={imageTools.flux2Steps}
+        flux2Guidance={imageTools.flux2Guidance}
+        flux2Seed={imageTools.flux2Seed}
+        flux2Device={imageTools.flux2Device}
+        flux2CpuOffload={imageTools.flux2CpuOffload}
+        flux2References={imageTools.flux2References}
+        isRunningFlux2={imageTools.isRunningFlux2}
+        flux2Status={imageTools.flux2Status}
         devices={devices}
         preferredModelDevice={preferredModelDevice}
-        onDrop={imageTools.handleImageDrop}
-        onChooseInputImage={imageTools.chooseInputImage}
+        onDrop={imageTools.imageAction === "flux2" ? imageTools.handleFlux2ReferenceDrop : imageTools.handleImageDrop}
+        onChooseInputImage={imageTools.imageAction === "flux2" ? imageTools.addFlux2References : imageTools.chooseInputImage}
         onSetImageAction={imageTools.setImageAction}
         onSetImageOutputName={imageTools.setImageOutputName}
         onSetDitherComparePreview={imageTools.setDitherComparePreview}
@@ -91,36 +107,71 @@ export function ImageWorkspace({
         onCopyPaletteCss={imageTools.copyPaletteCss}
         onDownloadPaletteCss={imageTools.downloadPaletteCss}
         onDownloadPaletteSheet={imageTools.downloadPaletteSheet}
-        onSetSupirModel={imageTools.setSupirModel}
-        onSetSupirPreset={imageTools.setSupirPreset}
-        onSetSupirDevice={imageTools.setSupirDevice}
-        onSetSupirUpscale={imageTools.setSupirUpscale}
-        onSetSupirUseLlava={imageTools.setSupirUseLlava}
-        onRunSupir={imageTools.runSupir}
-        onCancelSupir={imageTools.cancelSupir}
-      />
-      <ImagePreview
-        imageAction={imageTools.imageAction}
-        imageSrc={imageTools.imageSrc}
-        gifFrames={imageTools.gifFrames}
-        ditherGifFrames={imageTools.ditherGifFrames}
-        isDitherReady={imageTools.isDitherReady}
-        ditherFitMode={imageTools.ditherSettings.fitMode}
-        ditherComparePreview={imageTools.ditherComparePreview}
-        compressorComparePreview={imageTools.compressorSettings.compareOriginal}
-        compressorOutputPath={imageTools.compressorOutputPath}
-        compressorSizeSummary={imageTools.compressorSizeSummary}
-        ditherViewport={imageTools.ditherViewport}
-        onSetDitherViewport={imageTools.setDitherViewport}
-        supirOutputPath={imageTools.supirOutputPath}
-        paletteResult={imageTools.paletteResult}
-        paletteColorFormat={imageTools.paletteSettings.colorFormat}
-        ditherCanvasRef={imageTools.ditherCanvasRef}
-        ditherSourceCanvasRef={imageTools.ditherSourceCanvasRef}
-        paletteCanvasRef={imageTools.paletteCanvasRef}
-        paletteSourceCanvasRef={imageTools.paletteSourceCanvasRef}
-      />
-      <LogPanel lines={log} eta={eta} progress={jobProgress} step={jobStep} />
+        onSetFlux2AspectOrientation={imageTools.setFlux2AspectOrientation}
+        onSetFlux2AspectRatio={imageTools.setFlux2AspectRatio}
+        onSetFlux2Width={imageTools.setFlux2Width}
+        onSetFlux2Steps={imageTools.setFlux2Steps}
+        onSetFlux2Guidance={imageTools.setFlux2Guidance}
+        onSetFlux2Seed={imageTools.setFlux2Seed}
+        onSetFlux2Device={imageTools.setFlux2Device}
+        onSetFlux2CpuOffload={imageTools.setFlux2CpuOffload}
+        onRemoveFlux2Reference={imageTools.removeFlux2Reference} />
+      <div className="preview-stack">
+        {imageTools.imageAction === "vosr" && imageTools.skinMaskEditing ? (
+          <SkinMaskEditor key={imageTools.vosrOutputPath}
+            src={localAssetSrc(imageTools.vosrOutputPath)}
+            autoMask={imageTools.detectedSkinMask}
+            mode={imageTools.skinDetectionMode}
+            onModeChange={imageTools.setSkinDetectionMode}
+            crop={imageTools.skinCrop}
+            onCropChange={imageTools.setSkinCrop}
+            coverage={imageTools.skinMaskCoverage}
+            onCoverageChange={imageTools.setSkinMaskCoverage}
+            strokes={imageTools.skinStrokes}
+            onDetect={imageTools.detectSkinMask}
+            onClear={imageTools.clearSkinMask}
+            onStrokesChange={imageTools.setSkinStrokes}
+            onApply={imageTools.enhanceVosrSkin}
+            onClose={() => imageTools.setSkinMaskEditing(false)}
+            detecting={imageTools.isDetectingSkin}
+            busy={imageTools.isEnhancingVosr || imageTools.isDetectingSkin} />
+        ) : (
+          <ImagePreview
+            imageAction={imageTools.imageAction}
+            imageSrc={imageTools.imageSrc}
+            gifFrames={imageTools.gifFrames}
+            ditherGifFrames={imageTools.ditherGifFrames}
+            isDitherReady={imageTools.isDitherReady}
+            ditherFitMode={imageTools.ditherSettings.fitMode}
+            ditherComparePreview={imageTools.ditherComparePreview}
+            compressorComparePreview={imageTools.compressorSettings.compareOriginal}
+            compressorOutputPath={imageTools.compressorOutputPath}
+            compressorSizeSummary={imageTools.compressorSizeSummary}
+            ditherViewport={imageTools.ditherViewport}
+            onSetDitherViewport={imageTools.setDitherViewport}
+            vosrOutputPath={imageTools.vosrOutputPath}
+            vosrBlendSource={imageTools.vosrBlendSource}
+            vosrDetailPath={imageTools.vosrCompareDetail ? imageTools.vosrDetailPath : ""}
+            vosrStrength={imageTools.vosrStrength}
+            skinStrength={imageTools.skinStrength}
+            flux2OutputPath={imageTools.flux2OutputPath}
+            paletteResult={imageTools.paletteResult}
+            paletteColorFormat={imageTools.paletteSettings.colorFormat}
+            ditherCanvasRef={imageTools.ditherCanvasRef}
+            ditherSourceCanvasRef={imageTools.ditherSourceCanvasRef}
+            paletteCanvasRef={imageTools.paletteCanvasRef}
+            paletteSourceCanvasRef={imageTools.paletteSourceCanvasRef} />
+        )}
+        {imageTools.imageAction === "flux2" && (
+          <GenerativePromptBox
+            prompt={imageTools.flux2Prompt}
+            isRunning={imageTools.isRunningFlux2}
+            onPromptChange={imageTools.setFlux2Prompt}
+            onSubmit={imageTools.runFlux2}
+            onCancel={imageTools.cancelFlux2} />
+        )}
+      </div>
+      <LogPanel lines={log} onRetryToolChecks={onRetryToolChecks} eta={eta} progress={jobProgress} step={jobStep} />
     </section>
   );
 }

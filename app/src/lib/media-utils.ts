@@ -11,10 +11,11 @@ type ImageSourceLike = {
 };
 
 export function formatTime(seconds: number) {
-  const safe = Math.max(0, Math.round(seconds || 0));
-  const minutes = Math.floor(safe / 60);
-  const remainder = safe % 60;
-  return `${minutes}:${String(remainder).padStart(2, "0")}`;
+  const totalMilliseconds = Number.isFinite(seconds) ? Math.max(0, Math.round(seconds * 1000)) : 0;
+  const minutes = Math.floor(totalMilliseconds / 60_000);
+  const remainder = Math.floor(totalMilliseconds / 1000) % 60;
+  const milliseconds = totalMilliseconds % 1000;
+  return `${minutes}:${String(remainder).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
 }
 
 export function baseName(path: string) {
@@ -29,13 +30,14 @@ export function fileName(path: string) {
 }
 
 export function outputExtension(action: string, audioFormat: string) {
-  if (action === "extract_frame") return ".png";
+  if (action === "extract_frame" || action === "contact_sheet") return ".png";
   if (action === "video_audio") return audioFormat === "wav" ? ".wav" : ".mp3";
   return ".mp4";
 }
 
 export function outputSuffix(action: string, audioFormat: string) {
   if (action === "extract_frame") return "frame";
+  if (action === "contact_sheet") return "contact_sheet";
   if (action === "video_audio") return audioFormat;
   if (action === "social_export") return "social";
   if (action === "rife_interpolate") return "rife_2x";
@@ -51,6 +53,9 @@ export function socialExtension(format: string) {
 }
 
 export function formatProgressEvent(event: ProgressLike) {
+  if (event.stage === "Upscale frames" && /^Upscaling frame: \d+$/.test(event.message)) {
+    return event.message;
+  }
   return `${event.stage}: ${event.message}`;
 }
 
@@ -66,4 +71,11 @@ export function localAssetSrc(path: string) {
   } catch {
     return "";
   }
+}
+
+export function getPreviewRangeState(duration: number, visibleStart: number, visibleEnd: number, trimStart: number, trimEnd: number) {
+  const isPreviewFitted = duration > 0 && (Math.abs(visibleStart) > 0.001 || Math.abs(visibleEnd - duration) > 0.001);
+  const canFitSelection = duration > 0 && trimEnd - trimStart > 0.05 &&
+    (!isPreviewFitted || Math.abs(visibleStart - trimStart) > 0.001 || Math.abs(visibleEnd - trimEnd) > 0.001);
+  return { isPreviewFitted, canFitSelection };
 }

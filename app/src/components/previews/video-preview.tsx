@@ -1,4 +1,4 @@
-import type { PointerEvent, PointerEventHandler, ReactEventHandler, RefObject } from "react";
+import type { PointerEvent, PointerEventHandler, ReactEventHandler, ReactNode, RefObject } from "react";
 import { VideoPlayerShell, VideoTimeline } from "@/components/previews/video-preview-sections";
 
 type VideoMetadata = {
@@ -16,6 +16,7 @@ type Thumbnail = {
 };
 
 type VideoPreviewProps = {
+  caption?: ReactNode;
   videoRef: RefObject<HTMLVideoElement | null>;
   timelineRef: RefObject<HTMLDivElement | null>;
   thumbnailGridRef: RefObject<HTMLDivElement | null>;
@@ -35,6 +36,7 @@ type VideoPreviewProps = {
   trimStartPercent: number;
   trimEndPercent: number;
   thumbnails: Thumbnail[];
+  waveformUrl: string | null;
   trimStart: number;
   trimEnd: number;
   selectedDuration: number;
@@ -47,6 +49,7 @@ type VideoPreviewProps = {
   onEnded: () => void;
   onTogglePlayback: () => void;
   onToggleMute: () => void;
+  previewSettings: ReactNode;
   onUpdateTimelineHover: PointerEventHandler<HTMLDivElement>;
   onClearTimelineHover: () => void;
   onScrubTimeline: PointerEventHandler<HTMLDivElement>;
@@ -58,6 +61,7 @@ type VideoPreviewProps = {
 };
 
 export function VideoPreview({
+  caption,
   videoRef,
   timelineRef,
   thumbnailGridRef,
@@ -77,6 +81,7 @@ export function VideoPreview({
   trimStartPercent,
   trimEndPercent,
   thumbnails,
+  waveformUrl,
   trimStart,
   trimEnd,
   selectedDuration,
@@ -89,6 +94,7 @@ export function VideoPreview({
   onEnded,
   onTogglePlayback,
   onToggleMute,
+  previewSettings,
   onUpdateTimelineHover,
   onClearTimelineHover,
   onScrubTimeline,
@@ -101,6 +107,7 @@ export function VideoPreview({
   return (
     <section className="preview video-preview">
       <VideoPlayerShell
+        caption={caption}
         videoRef={videoRef}
         videoSrc={videoSrc}
         isVideoMuted={isVideoMuted}
@@ -117,8 +124,8 @@ export function VideoPreview({
         onEnded={onEnded}
         onTogglePlayback={onTogglePlayback}
         onToggleMute={onToggleMute}
-        formatTime={formatTime}
-      />
+        previewSettings={previewSettings}
+        formatTime={formatTime} />
       <VideoTimeline
         timelineRef={timelineRef}
         thumbnailGridRef={thumbnailGridRef}
@@ -132,6 +139,7 @@ export function VideoPreview({
         trimStartPercent={trimStartPercent}
         trimEndPercent={trimEndPercent}
         thumbnails={thumbnails}
+        waveformUrl={waveformUrl}
         trimStart={trimStart}
         trimEnd={trimEnd}
         selectedDuration={selectedDuration}
@@ -143,8 +151,7 @@ export function VideoPreview({
         onUpdateTrimDrag={onUpdateTrimDrag}
         onStopTrimDrag={onStopTrimDrag}
         formatTime={formatTime}
-        imageSource={imageSource}
-      />
+        imageSource={imageSource} />
     </section>
   );
 }

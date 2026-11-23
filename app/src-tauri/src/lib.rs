@@ -1,3 +1,20 @@
+mod realesrgan;
+mod adaptive_palette;
+mod video_effects;
+mod system_fonts;
+mod subtitle_fonts;
+mod caption_export;
+mod audio_models;
+mod transcription;
+mod transcription_credentials;
+mod shared_runtime;
+mod vosr;
+#[cfg(target_os = "linux")]
+mod supir;
+mod upscale_progress;
+#[cfg(target_os = "linux")]
+mod video_preview_stream;
+mod video_waveform;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -5,7 +22,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     env, fs,
     hash::{Hash, Hasher},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
@@ -17,11 +34,560 @@ use tauri::Emitter;
 
 static CANCEL_UPSCALE: AtomicBool = AtomicBool::new(false);
 const FACEFUSION_ENV_NAME: &str = "videotools-facefusion";
+#[cfg(not(target_os = "linux"))]
 const SUPIR_ENV_NAME: &str = "videotools-supir";
+const FLUX2_ENV_NAME: &str = "videotools-flux2";
+const WAN21_ENV_NAME: &str = "videotools-wan21";
+const WAN21_MODEL_ID: &str = "Wan-AI/Wan2.1-T2V-1.3B";
+const WAN21_REPO_URL: &str = "https://github.com/Wan-Video/Wan2.1";
+const WAN22_ENV_NAME: &str = "videotools-wan22";
+const WAN22_MODEL_ID: &str = "Wan-AI/Wan2.2-TI2V-5B";
+const WAN22_REPO_URL: &str = "https://github.com/Wan-Video/Wan2.2";
+const FLUX2_MODEL_ID: &str = "black-forest-labs/FLUX.2-klein-4B";
+const FLUX2_TORCH_VERSION: &str = "torch==2.8.0";
+const FLUX2_TORCHVISION_VERSION: &str = "torchvision==0.23.0";
+const FLUX2_TORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cu128";
+const FLUX2_TRANSFORMERS_VERSION: &str = "transformers==4.56.1";
+const FLUX2_ACCELERATE_VERSION: &str = "accelerate==1.12.0";
+const FLUX2_SAFETENSORS_VERSION: &str = "safetensors>=0.8.0rc0";
+const WAN22_TORCH_VERSION: &str = "torch==2.6.0";
+const WAN22_TORCHVISION_VERSION: &str = "torchvision==0.21.0";
+const WAN22_TORCHAUDIO_VERSION: &str = "torchaudio==2.6.0";
+const WAN22_TORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cu124";
+const WAN_FLASH_ATTN_WHEEL_URL: &str = "https://huggingface.co/lldacing/flash-attention-windows-wheel/resolve/main/flash_attn-2.7.4%2Bcu124torch2.6.0cxx11abiFALSE-cp310-cp310-win_amd64.whl";
+#[cfg(not(target_os = "linux"))]
 const SUPIR_TORCH_VERSION: &str = "torch==2.1.2+cu121";
+#[cfg(not(target_os = "linux"))]
 const SUPIR_TORCHVISION_VERSION: &str = "torchvision==0.16.2+cu121";
+#[cfg(not(target_os = "linux"))]
 const SUPIR_TORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cu121";
+#[cfg(not(target_os = "linux"))]
 const SUPIR_XFORMERS_VERSION: &str = "xformers==0.0.23.post1";
+const WAN21_RUNNER_SCRIPT: &str = r#"
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def bool_text(value):
+    return "True" if value else "False"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Wan2.1 T2V-1.3B generation.")
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--ckpt-dir", required=True)
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--size", required=True)
+    parser.add_argument("--frame-num", type=int, required=True)
+    parser.add_argument("--steps", type=int, required=True)
+    parser.add_argument("--guidance", type=float, required=True)
+    parser.add_argument("--seed", default="")
+    parser.add_argument("--offload-model", action="store_true")
+    parser.add_argument("--t5-cpu", action="store_true")
+    args = parser.parse_args()
+
+    repo = Path(args.repo)
+    generate = repo / "generate.py"
+    ckpt_dir = Path(args.ckpt_dir)
+    if not generate.exists():
+        raise FileNotFoundError(f"Wan generate.py was not found: {generate}")
+    if not ckpt_dir.exists():
+        raise FileNotFoundError(f"Wan checkpoint directory was not found: {ckpt_dir}")
+
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    seed = int(args.seed) if str(args.seed).strip() else -1
+
+    command = [
+        sys.executable,
+        str(generate),
+        "--task",
+        "t2v-1.3B",
+        "--ckpt_dir",
+        str(ckpt_dir),
+        "--prompt",
+        args.prompt,
+        "--size",
+        args.size,
+        "--frame_num",
+        str(args.frame_num),
+        "--sample_steps",
+        str(args.steps),
+        "--sample_shift",
+        "8",
+        "--sample_guide_scale",
+        f"{args.guidance:.3f}",
+        "--base_seed",
+        str(seed),
+        "--save_file",
+        str(output),
+        "--offload_model",
+        bool_text(args.offload_model),
+    ]
+    if args.t5_cpu:
+        command.append("--t5_cpu")
+
+    print(json.dumps({
+        "event": "launch",
+        "task": "t2v-1.3B",
+        "size": args.size,
+        "frameNum": args.frame_num,
+        "steps": args.steps,
+        "guidance": args.guidance,
+        "seed": seed,
+    }), flush=True)
+
+    env = os.environ.copy()
+    python_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(repo) if not python_path else str(repo) + os.pathsep + python_path
+    process = subprocess.Popen(command, cwd=repo, env=env)
+    code = process.wait()
+    if code != 0:
+        raise SystemExit(code)
+    if not output.exists():
+        raise FileNotFoundError(f"Wan did not produce an output video: {output}")
+    print(json.dumps({"event": "saved", "output": str(output)}), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(json.dumps({"event": "error", "message": str(exc)}), file=sys.stderr, flush=True)
+        raise
+"#;
+const WAN21_STATUS_SCRIPT: &str = r#"
+import importlib
+import importlib.metadata as metadata
+import json
+import sys
+from pathlib import Path
+
+packages = [
+    ("torch", "torch"),
+    ("torchvision", "torchvision"),
+    ("transformers", "transformers"),
+    ("diffusers", "diffusers"),
+    ("accelerate", "accelerate"),
+    ("imageio_ffmpeg", "imageio-ffmpeg"),
+    ("cv2", "opencv-python"),
+    ("einops", "einops"),
+    ("ftfy", "ftfy"),
+    ("regex", "regex"),
+    ("triton", "triton-windows"),
+]
+versions = {}
+missing = []
+for package, metadata_name in packages:
+    try:
+        importlib.import_module(package)
+        versions[package] = metadata.version(metadata_name)
+    except Exception as exc:
+        missing.append(f"{package}: {exc}")
+
+wan_import_ready = False
+wan_import_message = ""
+repo_dir = Path(__file__).resolve().parent / "repo"
+if repo_dir.exists():
+    sys.path.insert(0, str(repo_dir))
+    try:
+        import wan
+        from wan import WanT2V
+        from wan.configs import WAN_CONFIGS
+        if "t2v-1.3B" not in WAN_CONFIGS:
+            raise RuntimeError("Wan2.1 t2v-1.3B config is unavailable.")
+        wan_import_ready = True
+    except Exception as exc:
+        wan_import_message = str(exc)
+        missing.append(f"wan: {exc}")
+else:
+    wan_import_message = f"Wan2.1 repo folder is missing: {repo_dir}"
+    missing.append(wan_import_message)
+
+flash_attn_ready = False
+flash_attn_message = ""
+try:
+    importlib.import_module("flash_attn")
+    flash_attn_ready = True
+    versions["flash_attn"] = metadata.version("flash_attn")
+except Exception as exc:
+    flash_attn_message = str(exc)
+
+cuda_available = False
+cuda_name = ""
+try:
+    import torch
+    cuda_available = torch.cuda.is_available()
+    if cuda_available:
+        cuda_name = torch.cuda.get_device_name(0)
+except Exception:
+    pass
+
+ready = not missing
+message_parts = []
+if missing:
+    message_parts.append("Missing packages: " + "; ".join(missing))
+if not flash_attn_ready:
+    message_parts.append("flash_attn is not installed or unavailable; Wan may use more VRAM: " + flash_attn_message)
+if not message_parts:
+    message_parts.append("Wan2.1 Python runtime is ready.")
+
+print(json.dumps({
+    "ready": ready,
+    "versions": versions,
+    "wanImportReady": wan_import_ready,
+    "wanImportMessage": wan_import_message,
+    "flashAttnReady": flash_attn_ready,
+    "flashAttnMessage": flash_attn_message,
+    "cudaAvailable": cuda_available,
+    "cudaName": cuda_name,
+    "message": " ".join(message_parts),
+}))
+if not ready:
+    sys.exit(1)
+"#;
+const WAN22_RUNNER_SCRIPT: &str = r#"
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def bool_text(value):
+    return "True" if value else "False"
+
+
+def existing_file(path, label):
+    if not path:
+        return None
+    source = Path(path)
+    if not source.exists():
+        raise FileNotFoundError(f"{label} does not exist: {source}")
+    return source
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Wan2.2 TI2V-5B generation.")
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--ckpt-dir", required=True)
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--size", required=True)
+    parser.add_argument("--frame-num", type=int, required=True)
+    parser.add_argument("--steps", type=int, required=True)
+    parser.add_argument("--guidance", type=float, required=True)
+    parser.add_argument("--seed", default="")
+    parser.add_argument("--image", default="")
+    parser.add_argument("--offload-model", action="store_true")
+    parser.add_argument("--convert-model-dtype", action="store_true")
+    parser.add_argument("--t5-cpu", action="store_true")
+    args = parser.parse_args()
+
+    repo = Path(args.repo)
+    generate = repo / "generate.py"
+    ckpt_dir = Path(args.ckpt_dir)
+    if not generate.exists():
+        raise FileNotFoundError(f"Wan generate.py was not found: {generate}")
+    if not ckpt_dir.exists():
+        raise FileNotFoundError(f"Wan checkpoint directory was not found: {ckpt_dir}")
+
+    image = existing_file(args.image, "Reference image")
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    seed = int(args.seed) if str(args.seed).strip() else -1
+
+    command = [
+        sys.executable,
+        str(generate),
+        "--task",
+        "ti2v-5B",
+        "--ckpt_dir",
+        str(ckpt_dir),
+        "--prompt",
+        args.prompt,
+        "--size",
+        args.size,
+        "--frame_num",
+        str(args.frame_num),
+        "--sample_steps",
+        str(args.steps),
+        "--sample_guide_scale",
+        f"{args.guidance:.3f}",
+        "--base_seed",
+        str(seed),
+        "--save_file",
+        str(output),
+        "--offload_model",
+        bool_text(args.offload_model),
+    ]
+    if image is not None:
+        command.extend(["--image", str(image)])
+    if args.convert_model_dtype:
+        command.append("--convert_model_dtype")
+    if args.t5_cpu:
+        command.append("--t5_cpu")
+
+    print(json.dumps({
+        "event": "launch",
+        "task": "ti2v-5B",
+        "size": args.size,
+        "frameNum": args.frame_num,
+        "steps": args.steps,
+        "guidance": args.guidance,
+        "seed": seed,
+        "hasImage": image is not None,
+    }), flush=True)
+
+    env = os.environ.copy()
+    python_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(repo) if not python_path else str(repo) + os.pathsep + python_path
+    process = subprocess.Popen(command, cwd=repo, env=env)
+    code = process.wait()
+    if code != 0:
+        raise SystemExit(code)
+    if not output.exists():
+        raise FileNotFoundError(f"Wan did not produce an output video: {output}")
+    print(json.dumps({"event": "saved", "output": str(output)}), flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(json.dumps({"event": "error", "message": str(exc)}), file=sys.stderr, flush=True)
+        raise
+"#;
+const WAN22_STATUS_SCRIPT: &str = r#"
+import importlib
+import importlib.metadata as metadata
+import json
+import sys
+from pathlib import Path
+
+packages = [
+    ("torch", "torch"),
+    ("torchvision", "torchvision"),
+    ("transformers", "transformers"),
+    ("diffusers", "diffusers"),
+    ("accelerate", "accelerate"),
+    ("imageio_ffmpeg", "imageio-ffmpeg"),
+    ("cv2", "opencv-python"),
+    ("einops", "einops"),
+    ("decord", "decord"),
+    ("peft", "peft"),
+    ("librosa", "librosa"),
+    ("safetensors", "safetensors"),
+    ("regex", "regex"),
+]
+versions = {}
+missing = []
+for package, metadata_name in packages:
+    try:
+        importlib.import_module(package)
+        versions[package] = metadata.version(metadata_name)
+    except Exception as exc:
+        missing.append(f"{package}: {exc}")
+
+wan_import_ready = False
+wan_import_message = ""
+repo_dir = Path(__file__).resolve().parent / "repo"
+if repo_dir.exists():
+    sys.path.insert(0, str(repo_dir))
+    try:
+        import wan
+        from wan import WanTI2V
+        from wan.configs import ti2v_5B
+        from wan.modules.vae2_2 import Wan2_2_VAE
+        wan_import_ready = True
+    except Exception as exc:
+        wan_import_message = str(exc)
+        missing.append(f"wan: {exc}")
+else:
+    wan_import_message = f"Wan2.2 repo folder is missing: {repo_dir}"
+    missing.append(wan_import_message)
+
+flash_attn_ready = False
+flash_attn_message = ""
+try:
+    importlib.import_module("flash_attn")
+    flash_attn_ready = True
+    versions["flash_attn"] = metadata.version("flash_attn")
+except Exception as exc:
+    flash_attn_message = str(exc)
+
+cuda_available = False
+cuda_name = ""
+try:
+    import torch
+    cuda_available = torch.cuda.is_available()
+    if cuda_available:
+        cuda_name = torch.cuda.get_device_name(0)
+except Exception:
+    pass
+
+ready = not missing
+message_parts = []
+if missing:
+    message_parts.append("Missing packages: " + "; ".join(missing))
+if not flash_attn_ready:
+    message_parts.append("flash_attn is not installed or unavailable; Wan may run slower or fail if upstream requires it: " + flash_attn_message)
+if not message_parts:
+    message_parts.append("Wan2.2 Python runtime is ready.")
+
+print(json.dumps({
+    "ready": ready,
+    "versions": versions,
+    "wanImportReady": wan_import_ready,
+    "wanImportMessage": wan_import_message,
+    "flashAttnReady": flash_attn_ready,
+    "flashAttnMessage": flash_attn_message,
+    "cudaAvailable": cuda_available,
+    "cudaName": cuda_name,
+    "message": " ".join(message_parts),
+}))
+if not ready:
+    sys.exit(1)
+"#;
+const FLUX2_RUNNER_SCRIPT: &str = r#"
+import argparse
+import json
+import random
+import sys
+from pathlib import Path
+
+import torch
+from diffusers import Flux2KleinPipeline
+from PIL import Image, ImageOps
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def load_reference_image(path):
+    source = Path(path)
+    if not source.exists():
+        raise FileNotFoundError(f"Reference image does not exist: {source}")
+    with Image.open(source) as image:
+        return ImageOps.exif_transpose(image).convert("RGB")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Flux.2 Klein text-to-image inference.")
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--width", type=int, required=True)
+    parser.add_argument("--height", type=int, required=True)
+    parser.add_argument("--steps", type=int, default=4)
+    parser.add_argument("--guidance", type=float, default=1.0)
+    parser.add_argument("--seed", default="")
+    parser.add_argument("--model", default="black-forest-labs/FLUX.2-klein-4B")
+    parser.add_argument("--reference", action="append", default=[])
+    parser.add_argument("--cpu-offload", action="store_true")
+    args = parser.parse_args()
+
+    seed = int(args.seed) if str(args.seed).strip() else random.randint(0, 2**31 - 1)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    reference_images = [load_reference_image(path) for path in args.reference]
+
+    log(json.dumps({"event": "load", "model": args.model, "device": device, "dtype": str(dtype), "seed": seed}))
+    pipe = Flux2KleinPipeline.from_pretrained(args.model, torch_dtype=dtype)
+    if device == "cuda" and args.cpu_offload:
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe = pipe.to(device)
+
+    generator_device = "cuda" if device == "cuda" else "cpu"
+    generator = torch.Generator(device=generator_device).manual_seed(seed)
+    log(json.dumps({"event": "generate", "width": args.width, "height": args.height, "steps": args.steps, "guidance": args.guidance, "referenceCount": len(reference_images)}))
+    call_args = {
+        "prompt": args.prompt,
+        "height": args.height,
+        "width": args.width,
+        "guidance_scale": args.guidance,
+        "num_inference_steps": args.steps,
+        "generator": generator,
+    }
+    if reference_images:
+        call_args["image"] = reference_images[0] if len(reference_images) == 1 else reference_images
+    image = pipe(**call_args).images[0]
+
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output)
+    log(json.dumps({"event": "saved", "output": str(output), "seed": seed}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(json.dumps({"event": "error", "message": str(exc)}), file=sys.stderr, flush=True)
+        raise
+"#;
+const FLUX2_STATUS_SCRIPT: &str = r#"
+import importlib
+import importlib.metadata as metadata
+import json
+import sys
+
+packages = ["torch", "diffusers", "transformers", "accelerate"]
+versions = {}
+missing = []
+for package in packages:
+    try:
+        importlib.import_module(package)
+        versions[package] = metadata.version(package)
+    except Exception as exc:
+        missing.append(f"{package}: {exc}")
+
+pipeline_ready = False
+pipeline_error = ""
+try:
+    from diffusers import Flux2KleinPipeline
+    pipeline_ready = Flux2KleinPipeline is not None
+except Exception as exc:
+    pipeline_error = str(exc)
+
+cuda_available = False
+cuda_name = ""
+try:
+    import torch
+    cuda_available = torch.cuda.is_available()
+    if cuda_available:
+        cuda_name = torch.cuda.get_device_name(0)
+except Exception:
+    pass
+
+ready = not missing and pipeline_ready
+message_parts = []
+if missing:
+    message_parts.append("Missing packages: " + "; ".join(missing))
+if not pipeline_ready:
+    message_parts.append("Flux2KleinPipeline is unavailable: " + pipeline_error)
+if not message_parts:
+    message_parts.append("Flux.2 Python runtime is ready.")
+
+print(json.dumps({
+    "ready": ready,
+    "versions": versions,
+    "pipelineReady": pipeline_ready,
+    "cudaAvailable": cuda_available,
+    "cudaName": cuda_name,
+    "message": " ".join(message_parts),
+}))
+if not ready:
+    sys.exit(1)
+"#;
+#[cfg(not(target_os = "linux"))]
 const SUPIR_XFORMERS_CHECK_SCRIPT: &str = r#"
 import importlib.metadata as metadata
 import json
@@ -63,10 +629,15 @@ struct ToolStatus {
     realesrgan: Option<String>,
     rife: Option<String>,
     supir: Option<String>,
+    flux2: Option<String>,
+    wan21: Option<String>,
+    wan22: Option<String>,
     facefusion: Option<String>,
     git: Option<String>,
     conda: Option<String>,
     cudnn: Option<String>,
+    #[serde(rename = "windowsDeveloperMode")]
+    windows_developer_mode: Option<String>,
     imagemagick: Option<String>,
     oxipng: Option<String>,
     libavif: Option<String>,
@@ -84,6 +655,9 @@ struct UpdateAvailability {
     facefusion: bool,
     supir: bool,
     supir_xformers: bool,
+    flux2: bool,
+    wan21: bool,
+    wan22: bool,
     imagemagick: bool,
     oxipng: bool,
     libavif: bool,
@@ -114,13 +688,12 @@ fn default_true() -> bool {
     true
 }
 
+const DEFAULT_OUTPUT_FOLDER: &str = "output";
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            default_download_folder: workspace_root()
-                .join("output")
-                .to_string_lossy()
-                .to_string(),
+            default_download_folder: DEFAULT_OUTPUT_FOLDER.to_string(),
             temp_folder: workspace_root().join("temp").to_string_lossy().to_string(),
             cuda_bin_folder: find_cuda_bin_dir()
                 .map(|path| path.to_string_lossy().to_string())
@@ -137,6 +710,7 @@ impl Default for AppSettings {
 
 #[derive(Serialize)]
 struct VideoMetadata {
+    rotation: i64,
     duration: f64,
     fps: f64,
     width: u64,
@@ -212,7 +786,7 @@ struct RealEsrganModel {
     estimated_size_label: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RealEsrganDevice {
     id: String,
@@ -275,6 +849,74 @@ struct SupirStatus {
     xformers_ready: bool,
     xformers_version: String,
     xformers_message: String,
+    cuda_devices: Option<Vec<Value>>,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Flux2Status {
+    state: String,
+    tool_path: String,
+    env_name: String,
+    cache_path: String,
+    current_size_label: String,
+    estimated_install_label: String,
+    runtime_ready: bool,
+    cuda_ready: bool,
+    cuda_label: String,
+    torch_version: String,
+    diffusers_version: String,
+    transformers_version: String,
+    accelerate_version: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Wan21Status {
+    state: String,
+    tool_path: String,
+    repo_path: String,
+    model_path: String,
+    cache_path: String,
+    env_name: String,
+    current_size_label: String,
+    estimated_install_label: String,
+    runtime_ready: bool,
+    model_ready: bool,
+    cuda_ready: bool,
+    cuda_label: String,
+    torch_version: String,
+    transformers_version: String,
+    diffusers_version: String,
+    accelerate_version: String,
+    flash_attn_ready: bool,
+    flash_attn_message: String,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Wan22Status {
+    state: String,
+    tool_path: String,
+    repo_path: String,
+    model_path: String,
+    cache_path: String,
+    env_name: String,
+    current_size_label: String,
+    estimated_install_label: String,
+    runtime_ready: bool,
+    model_ready: bool,
+    cuda_ready: bool,
+    cuda_label: String,
+    torch_version: String,
+    transformers_version: String,
+    diffusers_version: String,
+    accelerate_version: String,
+    flash_attn_ready: bool,
+    flash_attn_message: String,
     message: String,
 }
 
@@ -419,6 +1061,56 @@ struct SupirImageOptions {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct Flux2ImageOptions {
+    prompt: String,
+    output_name: String,
+    width: u32,
+    height: u32,
+    steps: u32,
+    guidance: f64,
+    seed: String,
+    #[serde(default)]
+    reference_paths: Vec<String>,
+    device: Option<String>,
+    cpu_offload: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Wan22VideoOptions {
+    prompt: String,
+    image_path: Option<String>,
+    output_name: String,
+    orientation: String,
+    size: String,
+    frame_count: u32,
+    steps: u32,
+    guidance: f64,
+    seed: String,
+    device: Option<String>,
+    offload_model: bool,
+    convert_model_dtype: bool,
+    t5_cpu: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Wan21VideoOptions {
+    prompt: String,
+    output_name: String,
+    orientation: String,
+    size: String,
+    frame_count: u32,
+    steps: u32,
+    guidance: f64,
+    seed: String,
+    device: Option<String>,
+    offload_model: bool,
+    t5_cpu: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ImageCompressOptions {
     input_path: String,
     output_name: String,
@@ -445,6 +1137,69 @@ struct SaveImageCompressPreviewOptions {
     format: String,
 }
 
+// All UI discovery runs off the event thread and only for the requested tool.
+#[tauri::command]
+async fn probe_tool(app: tauri::AppHandle, tool: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if tool == "vosr" {
+            let status = vosr::status(&app)?;
+            return Ok(serde_json::json!({ "path": status.runtime_ready.then(|| status.path.clone()), "status": status }));
+        }
+        probe_tool_blocking(&tool)
+    })
+        .await
+        .map_err(|err| format!("Tool probe failed: {err}"))?
+}
+
+fn probe_tool_blocking(tool: &str) -> Result<Value, String> {
+    use serde_json::json;
+    let result = match tool {
+        "devices" => {
+            json!({ "devices": if find_tool("realesrgan-ncnn-vulkan").is_some() { detect_realesrgan_devices()? } else { Vec::<RealEsrganDevice>::new() } })
+        }
+        "realesrgan" => {
+            json!({ "path": find_tool("realesrgan-ncnn-vulkan"), "models": list_realesrgan_models()? })
+        }
+        "rife" => json!({ "path": find_tool("rife-ncnn-vulkan"), "models": list_rife_models()? }),
+        "supir" => {
+            json!({ "status": supir_status(), "models": list_supir_models()?, "path": supir_repo_ready().then(|| supir_repo_dir()) })
+        }
+        "facefusion" => {
+            json!({ "status": facefusion_status(), "path": facefusion_repo_ready().then(|| facefusion_repo_dir()) })
+        }
+        "flux2" => {
+            let status = flux2_status();
+            json!({ "path": status.runtime_ready.then(|| flux2_tool_dir()), "status": status })
+        }
+        "wan21" => {
+            let status = wan21_status();
+            json!({ "path": status.runtime_ready.then(|| wan21_tool_dir()), "status": status })
+        }
+        "wan22" => {
+            let status = wan22_status();
+            json!({ "path": status.runtime_ready.then(|| wan22_tool_dir()), "status": status })
+        }
+        "cudnn" => json!({ "path": find_cudnn_runtime() }),
+        "windowsDeveloperMode" => {
+            json!({ "path": windows_developer_mode_enabled().then_some("enabled") })
+        }
+        "ffmpeg" | "ffprobe" | "git" | "conda" | "oxipng" => json!({ "path": find_tool(tool) }),
+        "imagemagick" => json!({ "path": find_tool("magick") }),
+        "libavif" => json!({ "path": find_tool("avifenc") }),
+        "libwebp" => json!({ "path": find_tool("cwebp") }),
+        "mozjpeg" => json!({ "path": find_tool("cjpeg") }),
+        _ => return Err(format!("Unknown tool: {tool}")),
+    };
+    Ok(result)
+}
+
+#[tauri::command]
+async fn probe_tool_storage(tool: String) -> Result<Vec<ToolStorage>, String> {
+    tauri::async_runtime::spawn_blocking(move || tool_storage(Some(&tool)))
+        .await
+        .map_err(|err| format!("Storage probe failed: {err}"))
+}
+
 #[tauri::command]
 fn detect_tools() -> ToolStatus {
     ToolStatus {
@@ -453,11 +1208,15 @@ fn detect_tools() -> ToolStatus {
         realesrgan: find_tool("realesrgan-ncnn-vulkan"),
         rife: find_tool("rife-ncnn-vulkan"),
         supir: supir_repo_ready().then(|| supir_repo_dir().to_string_lossy().to_string()),
+        flux2: flux2_runtime_ready().then(|| flux2_tool_dir().to_string_lossy().to_string()),
+        wan21: wan21_runtime_ready().then(|| wan21_tool_dir().to_string_lossy().to_string()),
+        wan22: wan22_runtime_ready().then(|| wan22_tool_dir().to_string_lossy().to_string()),
         facefusion: facefusion_repo_ready()
             .then(|| facefusion_repo_dir().to_string_lossy().to_string()),
         git: find_tool("git"),
         conda: find_tool("conda"),
         cudnn: find_cudnn_runtime(),
+        windows_developer_mode: windows_developer_mode_enabled().then(|| "enabled".to_string()),
         imagemagick: find_tool("magick"),
         oxipng: find_tool("oxipng"),
         libavif: find_tool("avifenc"),
@@ -493,6 +1252,9 @@ fn check_tool_updates_blocking() -> UpdateAvailability {
         facefusion,
         supir,
         supir_xformers: false,
+        flux2: false,
+        wan21: false,
+        wan22: false,
         imagemagick: false,
         oxipng: false,
         libavif: false,
@@ -545,6 +1307,22 @@ fn git_rev_parse(git: &str, repo_dir: &Path, rev: &str) -> Option<String> {
 }
 
 #[tauri::command]
+async fn video_preview_url(path: String) -> Result<Option<String>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        video_preview_stream::preview_url(PathBuf::from(path))
+            .await
+            .map(Some)
+            .map_err(|err| format!("Could not open video preview: {err}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
+#[tauri::command]
 fn probe_video(path: String) -> Result<VideoMetadata, String> {
     let input_path = PathBuf::from(path);
     if !input_path.exists() {
@@ -559,7 +1337,7 @@ fn probe_video(path: String) -> Result<VideoMetadata, String> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,r_frame_rate,avg_frame_rate,codec_name",
+            "stream=width,height,r_frame_rate,avg_frame_rate,codec_name:stream_side_data=rotation",
             "-show_entries",
             "format=duration",
             "-of",
@@ -580,6 +1358,7 @@ fn probe_video(path: String) -> Result<VideoMetadata, String> {
         .ok_or("No video stream found.")?;
 
     Ok(VideoMetadata {
+        rotation: stream["side_data_list"].as_array().and_then(|list| list.iter().find_map(|item| item["rotation"].as_i64())).unwrap_or(0),
         duration: data["format"]["duration"]
             .as_str()
             .and_then(|value| value.parse::<f64>().ok())
@@ -685,7 +1464,9 @@ fn generate_thumbnails(
         };
         let output_path = output_dir.join(format!("thumb_{index:02}.jpg"));
 
-        if let Err(error) = create_thumbnail(&ffmpeg, &input_path, &output_path, time) {
+        if let Err(error) =
+            create_thumbnail(&ffmpeg, &input_path, &output_path, time, "scale=160:-1", "4")
+        {
             last_error = error;
             continue;
         }
@@ -714,8 +1495,83 @@ fn generate_thumbnails(
 }
 
 #[tauri::command]
+async fn sample_contact_sheet(
+    app: tauri::AppHandle,
+    path: String,
+    start: f64,
+    end: f64,
+    count: u32,
+    tile_width: u32,
+) -> Result<Vec<Thumbnail>, String> {
+    if !(1..=48).contains(&count)
+        || !start.is_finite()
+        || !end.is_finite()
+        || start < 0.0
+        || end <= start
+    {
+        return Err("Select a non-empty video range and a frame count from 1 to 48.".into());
+    }
+    if !matches!(tile_width, 320 | 480 | 640) {
+        return Err("Select a contact sheet tile width of 320, 480, or 640 pixels.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let input = PathBuf::from(path);
+        if !input.is_file() {
+            return Err("Input video does not exist.".into());
+        }
+        let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
+        let scratch = tempfile::tempdir().map_err(|err| err.to_string())?;
+        let mut frames: Vec<Thumbnail> = Vec::with_capacity(count as usize);
+        let interval = (end - start) / f64::from(count);
+        let tile_height = tile_width * 9 / 16;
+        let filter = format!(
+            "scale={tile_width}:{tile_height}:flags=lanczos:force_original_aspect_ratio=decrease,setsar=1"
+        );
+        for index in 0..count {
+            let mut time = start + (f64::from(index) + 0.5) * interval;
+            let output = scratch.path().join(format!("frame-{index}.jpg"));
+            match create_thumbnail(&ffmpeg, &input, &output, time, &filter, "2") {
+                Ok(()) => {}
+                Err(error) if error.is_empty() => {
+                    // A seek past the final decodable frame may succeed without writing an image.
+                    if let Some(previous) = frames.last() {
+                        frames.push(Thumbnail {
+                            time: previous.time,
+                            data_url: previous.data_url.clone(),
+                        });
+                        continue;
+                    }
+                    time = start;
+                    create_thumbnail(&ffmpeg, &input, &output, time, &filter, "2")
+                        .map_err(|err| format!("Could not sample the selected range. {err}"))?;
+                }
+                Err(error) => return Err(format!("Could not sample the video at {time:.3}s: {error}")),
+            }
+            let bytes = fs::read(output).map_err(|err| err.to_string())?;
+            frames.push(Thumbnail {
+                time,
+                data_url: format!(
+                    "data:image/jpeg;base64,{}",
+                    general_purpose::STANDARD.encode(bytes)
+                ),
+            });
+            emit_progress_detail(
+                &app,
+                "Contact Sheet",
+                format!("Sampled frame {} of {count}", index + 1),
+                Some(f64::from(index + 1) / f64::from(count) * 90.0),
+                Some("Sampling frames"),
+            );
+        }
+        Ok(frames)
+    })
+    .await
+    .map_err(|err| format!("Contact sheet task failed: {err}"))?
+}
+
+#[tauri::command]
 fn list_realesrgan_models() -> Result<Vec<RealEsrganModel>, String> {
-    let executable = find_tool("realesrgan-ncnn-vulkan").ok_or("Real-ESRGAN was not found.")?;
+    let Some(executable) = find_tool("realesrgan-ncnn-vulkan") else { return Ok(Vec::new()); };
     let models_dir = PathBuf::from(executable)
         .parent()
         .ok_or("Real-ESRGAN path has no parent directory.")?
@@ -731,6 +1587,7 @@ fn list_realesrgan_models() -> Result<Vec<RealEsrganModel>, String> {
             let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
                 continue;
             };
+            if !realesrgan::model_ready(&realesrgan::root()?, name) { continue; }
             let bin_path = path.with_extension("bin");
             let size_bytes = file_size(&path) + file_size(&bin_path);
             models.push(RealEsrganModel {
@@ -749,60 +1606,8 @@ fn list_realesrgan_models() -> Result<Vec<RealEsrganModel>, String> {
 
 #[tauri::command]
 fn detect_realesrgan_devices() -> Result<Vec<RealEsrganDevice>, String> {
-    let executable = find_tool("realesrgan-ncnn-vulkan").ok_or("Real-ESRGAN was not found.")?;
-    let model = list_realesrgan_models()?
-        .first()
-        .map(|item| item.name.clone())
-        .unwrap_or_else(|| "realesr-animevideov3-x2".to_string());
-    let output_path = workspace_root()
-        .join("temp")
-        .join(format!("gpu_probe_{}.png", timestamp_id()));
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-
-    let output = Command::new(&executable)
-        .arg("-i")
-        .arg("input.jpg")
-        .arg("-o")
-        .arg(output_path)
-        .arg("-n")
-        .arg(&model)
-        .arg("-s")
-        .arg(realesrgan_model_scale(&model))
-        .args(["-t", "0", "-j", "1:2:2", "-f", "png", "-g", "0"])
-        .current_dir(executable_parent(&executable)?)
-        .output()
-        .map_err(|err| format!("Failed to run Real-ESRGAN GPU probe: {err}"))?;
-
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut devices = Vec::new();
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix('[') else {
-            continue;
-        };
-        let Some((inside, _)) = rest.split_once(']') else {
-            continue;
-        };
-        let Some((id, name)) = inside.split_once(' ') else {
-            continue;
-        };
-        if id.chars().all(|character| character.is_ascii_digit())
-            && !devices
-                .iter()
-                .any(|device: &RealEsrganDevice| device.id == id)
-        {
-            devices.push(RealEsrganDevice {
-                id: id.to_string(),
-                name: name.trim().to_string(),
-            });
-        }
-    }
-    Ok(devices)
+    if list_realesrgan_models()?.is_empty() { return Ok(Vec::new()); }
+    realesrgan::devices()
 }
 
 #[tauri::command]
@@ -875,6 +1680,10 @@ fn list_supir_models() -> Result<Vec<SupirModel>, String> {
 
 #[tauri::command]
 fn get_tool_storage() -> Vec<ToolStorage> {
+    tool_storage(None)
+}
+
+fn tool_storage(selected: Option<&str>) -> Vec<ToolStorage> {
     let root = workspace_root().join("tools");
     let items = [
         (
@@ -898,7 +1707,7 @@ fn get_tool_storage() -> Vec<ToolStorage> {
         (
             "realesrgan",
             "Real-ESRGAN",
-            root.join("realesrgan-ncnn-vulkan"),
+            realesrgan::root().unwrap_or_else(|_| root.join("realesrgan-ncnn-vulkan")),
             "~120-350 MB with bundled models",
         ),
         (
@@ -912,6 +1721,24 @@ fn get_tool_storage() -> Vec<ToolStorage> {
             "SUPIR",
             root.join("supir"),
             "~20-80 GB depending on checkpoints",
+        ),
+        (
+            "flux2",
+            "Flux.2",
+            root.join("flux2"),
+            "~12-30 GB depending on cache and model weights",
+        ),
+        (
+            "wan22",
+            "Wan2.2",
+            root.join("wan22"),
+            "~25-60 GB depending on model cache and runtime",
+        ),
+        (
+            "wan21",
+            "Wan2.1",
+            root.join("wan21"),
+            "~10-25 GB depending on model cache and runtime",
         ),
         (
             "facefusion",
@@ -953,6 +1780,7 @@ fn get_tool_storage() -> Vec<ToolStorage> {
 
     items
         .into_iter()
+        .filter(|(key, _, _, _)| selected.map_or(true, |selected| selected == *key))
         .map(|(key, label, path, estimated_install_label)| {
             let current_bytes = dir_size(&path);
             ToolStorage {
@@ -981,9 +1809,8 @@ fn delete_tool_model(tool: String, model: String) -> Result<JobResult, String> {
 
 #[tauri::command]
 fn default_output_dir() -> Result<String, String> {
-    let output = get_app_settings()
-        .map(|settings| PathBuf::from(settings.default_download_folder))
-        .unwrap_or_else(|_| workspace_root().join("output"));
+    let settings = get_app_settings().unwrap_or_default();
+    let output = workspace_root().join(settings.default_download_folder);
     fs::create_dir_all(&output).map_err(|err| err.to_string())?;
     Ok(output.to_string_lossy().to_string())
 }
@@ -1006,12 +1833,9 @@ impl OutputKind {
 
 fn output_dir_for(kind: OutputKind) -> Result<PathBuf, String> {
     let settings = get_app_settings()?;
-    let root = if settings.default_download_folder.trim().is_empty() {
-        workspace_root().join("output")
-    } else {
-        PathBuf::from(settings.default_download_folder)
-    };
-    let output_dir = root.join(kind.folder_name());
+    let output_dir = workspace_root()
+        .join(settings.default_download_folder)
+        .join(kind.folder_name());
     fs::create_dir_all(&output_dir).map_err(|err| err.to_string())?;
     Ok(output_dir)
 }
@@ -1117,6 +1941,7 @@ fn save_data_url_to_downloads(
     app: tauri::AppHandle,
     output_name: String,
     data_url: String,
+    preserve_existing: Option<bool>,
 ) -> Result<JobResult, String> {
     emit_progress_detail(
         &app,
@@ -1132,8 +1957,18 @@ fn save_data_url_to_downloads(
         .decode(encoded)
         .map_err(|err| format!("Data URL decode failed: {err}"))?;
     let folder = output_dir_for(OutputKind::Image)?;
-    let output_path = folder.join(safe_output_filename(&output_name, "download.bin"));
-    fs::write(&output_path, bytes).map_err(|err| err.to_string())?;
+    let file_name = safe_output_filename(&output_name, "download.bin");
+    let output_path = if preserve_existing.unwrap_or(false) {
+        let path = unique_output_path(&folder, &file_name);
+        let mut staged = tempfile::NamedTempFile::new_in(&folder).map_err(|err| err.to_string())?;
+        staged.write_all(&bytes).map_err(|err| err.to_string())?;
+        staged.persist_noclobber(&path).map_err(|err| err.to_string())?;
+        path
+    } else {
+        let path = folder.join(file_name);
+        fs::write(&path, bytes).map_err(|err| err.to_string())?;
+        path
+    };
     emit_progress_detail(
         &app,
         "Image Export",
@@ -1897,6 +2732,21 @@ fn cancel_supir_image_job() {
 }
 
 #[tauri::command]
+fn cancel_flux2_image_job() {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn cancel_wan22_video_job() {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn cancel_wan21_video_job() {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
 fn import_supir_checkpoint(
     source_path: String,
     checkpoint_name: String,
@@ -2015,12 +2865,721 @@ fn detect_supir() -> SupirStatus {
 }
 
 #[tauri::command]
+fn detect_flux2() -> Flux2Status {
+    flux2_status()
+}
+
+#[tauri::command]
+fn detect_wan21() -> Wan21Status {
+    wan21_status()
+}
+
+#[tauri::command]
+fn detect_wan22() -> Wan22Status {
+    wan22_status()
+}
+
+#[tauri::command]
+async fn install_or_update_flux2(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || install_or_update_flux2_blocking(app))
+        .await
+        .map_err(|err| format!("Flux.2 install task failed: {err}"))?
+}
+
+fn install_or_update_flux2_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    let conda = find_tool("conda")
+        .ok_or("Conda was not found in PATH. Install Miniforge before installing Flux.2.")?;
+    let git = find_tool("git").ok_or(
+        "Git was not found in PATH. Git is needed to install current Diffusers for Flux.2.",
+    )?;
+    let tool_dir = flux2_tool_dir();
+    fs::create_dir_all(&tool_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(flux2_cache_dir()).map_err(|err| err.to_string())?;
+    write_flux2_runtime_files()?;
+
+    let mut full_log = String::new();
+    if !conda_named_env_ready(&conda, FLUX2_ENV_NAME) {
+        let mut create = Command::new(&conda);
+        create.args([
+            "create",
+            "--yes",
+            "--name",
+            FLUX2_ENV_NAME,
+            "python=3.12",
+            "pip",
+        ]);
+        run_stage(
+            &app,
+            "Flux.2 environment",
+            &mut create,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    }
+
+    let mut install_torch = Command::new(&conda);
+    install_torch.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        FLUX2_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        FLUX2_TORCH_VERSION,
+        FLUX2_TORCHVISION_VERSION,
+        "--index-url",
+        FLUX2_TORCH_INDEX_URL,
+    ]);
+    run_stage(
+        &app,
+        "Flux.2 PyTorch",
+        &mut install_torch,
+        Some(tool_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    let mut install_runtime = Command::new(&conda);
+    install_runtime.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        FLUX2_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "git+https://github.com/huggingface/diffusers.git",
+        FLUX2_TRANSFORMERS_VERSION,
+        FLUX2_ACCELERATE_VERSION,
+        FLUX2_SAFETENSORS_VERSION,
+        "pillow",
+        "huggingface_hub[hf_xet]",
+        "hf_xet",
+    ]);
+    install_runtime.env("GIT_PYTHON_GIT_EXECUTABLE", &git);
+    if let Some(git_dir) = PathBuf::from(&git).parent() {
+        prepend_paths_env(&mut install_runtime, &[git_dir.to_path_buf()]);
+    }
+    run_stage(
+        &app,
+        "Flux.2 runtime",
+        &mut install_runtime,
+        Some(tool_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    let status = flux2_status();
+    if !status.runtime_ready {
+        return Err(status.message);
+    }
+
+    emit_progress(
+        &app,
+        "Flux.2",
+        "Installed Flux.2 Python runtime. The model weights will download on first run."
+            .to_string(),
+    );
+    Ok(JobResult {
+        output_path: tool_dir.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn install_or_update_wan21(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || install_or_update_wan21_blocking(app))
+        .await
+        .map_err(|err| format!("Wan2.1 install task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn delete_wan21(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_wan21_blocking(app))
+        .await
+        .map_err(|err| format!("Wan2.1 remove task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn install_or_update_wan22(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || install_or_update_wan22_blocking(app))
+        .await
+        .map_err(|err| format!("Wan2.2 install task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn delete_wan22(app: tauri::AppHandle) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_wan22_blocking(app))
+        .await
+        .map_err(|err| format!("Wan2.2 remove task failed: {err}"))?
+}
+
+fn install_or_update_wan21_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    let conda = find_tool("conda")
+        .ok_or("Conda was not found in PATH. Install Miniforge before installing Wan2.1.")?;
+    let git =
+        find_tool("git").ok_or("Git was not found in PATH. Git is needed to install Wan2.1.")?;
+    let tool_dir = wan21_tool_dir();
+    let repo_dir = wan21_repo_dir();
+    fs::create_dir_all(&tool_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(wan21_cache_dir()).map_err(|err| err.to_string())?;
+    fs::create_dir_all(wan21_models_dir()).map_err(|err| err.to_string())?;
+    write_wan21_runtime_files()?;
+
+    let mut full_log = String::new();
+    if repo_dir.join("generate.py").exists() {
+        let mut pull = Command::new(&git);
+        pull.args(["-C"]).arg(&repo_dir).args(["pull", "--ff-only"]);
+        run_stage(&app, "Wan2.1 update", &mut pull, None, None, &mut full_log)?;
+    } else {
+        let mut clone = Command::new(&git);
+        clone.args(["clone", WAN21_REPO_URL]).arg(&repo_dir);
+        run_stage(&app, "Wan2.1 clone", &mut clone, None, None, &mut full_log)?;
+    }
+
+    if !conda_named_env_ready(&conda, WAN21_ENV_NAME) {
+        let mut create = Command::new(&conda);
+        create.args([
+            "create",
+            "--yes",
+            "--name",
+            WAN21_ENV_NAME,
+            "python=3.10",
+            "pip",
+        ]);
+        run_stage(
+            &app,
+            "Wan2.1 environment",
+            &mut create,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    }
+
+    let mut install_torch = Command::new(&conda);
+    install_torch.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        WAN21_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        WAN22_TORCH_VERSION,
+        WAN22_TORCHVISION_VERSION,
+        WAN22_TORCHAUDIO_VERSION,
+        "--index-url",
+        WAN22_TORCH_INDEX_URL,
+    ]);
+    run_stage(
+        &app,
+        "Wan2.1 PyTorch",
+        &mut install_torch,
+        Some(tool_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    let mut install_runtime = Command::new(&conda);
+    install_runtime.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        WAN21_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "opencv-python>=4.9.0.80",
+        "diffusers>=0.31.0",
+        "transformers>=4.49.0,<=4.51.3",
+        "tokenizers>=0.20.3",
+        "accelerate>=1.1.1",
+        "tqdm",
+        "imageio[ffmpeg]",
+        "easydict",
+        "einops",
+        "ftfy",
+        "dashscope",
+        "imageio-ffmpeg",
+        "decord",
+        "peft",
+        "librosa",
+        "safetensors",
+        "regex",
+        "packaging",
+        "ninja",
+        "triton-windows<3.3",
+        "numpy>=1.23.5,<2",
+        "pillow",
+        "huggingface_hub[hf_xet,cli]",
+        "hf_xet",
+    ]);
+    run_stage(
+        &app,
+        "Wan2.1 runtime",
+        &mut install_runtime,
+        Some(repo_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    let mut install_flash = Command::new(&conda);
+    install_flash.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        WAN21_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        WAN_FLASH_ATTN_WHEEL_URL,
+    ]);
+    if let Err(err) = run_stage(
+        &app,
+        "Wan2.1 flash attention",
+        &mut install_flash,
+        Some(repo_dir.clone()),
+        None,
+        &mut full_log,
+    ) {
+        let message = format!("Wan2.1 flash_attn install skipped: {err}");
+        full_log.push_str(&message);
+        full_log.push('\n');
+        emit_progress(&app, "Wan2.1", message);
+    }
+
+    if !wan21_model_ready() {
+        download_wan21_model(&app, &conda, &tool_dir, &mut full_log)?;
+    }
+
+    let status = wan21_status();
+    if !status.runtime_ready || !status.model_ready {
+        return Err(status.message);
+    }
+
+    emit_progress_detail(
+        &app,
+        "Wan2.1",
+        "Installed Wan2.1 T2V-1.3B runtime and model.".to_string(),
+        Some(100.0),
+        Some("Ready"),
+    );
+    Ok(JobResult {
+        output_path: tool_dir.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+fn download_wan21_model(
+    app: &tauri::AppHandle,
+    conda: &str,
+    tool_dir: &Path,
+    full_log: &mut String,
+) -> Result<(), String> {
+    emit_progress_detail(
+        app,
+        "Wan2.1 model",
+        "Downloading Wan2.1 T2V-1.3B model. Partial downloads will be reused if this is a repair."
+            .to_string(),
+        Some(5.0),
+        Some("Downloading model"),
+    );
+    let first_result =
+        run_wan21_model_download_attempt(app, conda, tool_dir, full_log, false, "Wan2.1 model");
+    if first_result.is_ok() || wan21_model_ready() {
+        return Ok(());
+    }
+
+    let first_error = first_result
+        .err()
+        .unwrap_or_else(|| "unknown error".to_string());
+    let retry_message = format!(
+        "Wan2.1 model download did not finish: {first_error} Retrying with Hugging Face Xet disabled."
+    );
+    full_log.push_str(&retry_message);
+    full_log.push('\n');
+    emit_progress_detail(
+        app,
+        "Wan2.1 model",
+        retry_message,
+        Some(45.0),
+        Some("Retrying model download"),
+    );
+
+    run_wan21_model_download_attempt(
+        app,
+        conda,
+        tool_dir,
+        full_log,
+        true,
+        "Wan2.1 model fallback",
+    )
+    .map_err(|err| {
+        format!(
+            "Wan2.1 model download failed after retry. Check your Hugging Face connection/login and run Repair / Update again. Last error: {err}"
+        )
+    })?;
+    if wan21_model_ready() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Wan2.1 model download finished, but required model files were not found at {}.",
+            wan21_model_dir().display()
+        ))
+    }
+}
+
+fn run_wan21_model_download_attempt(
+    app: &tauri::AppHandle,
+    conda: &str,
+    tool_dir: &Path,
+    full_log: &mut String,
+    disable_xet: bool,
+    stage: &str,
+) -> Result<(), String> {
+    let mut download = Command::new(conda);
+    download
+        .args([
+            "run",
+            "--no-capture-output",
+            "-n",
+            WAN21_ENV_NAME,
+            "huggingface-cli",
+            "download",
+            WAN21_MODEL_ID,
+            "--local-dir",
+        ])
+        .arg(wan21_model_dir())
+        .args(["--local-dir-use-symlinks", "False"]);
+    add_wan21_cache_env(&mut download);
+    download.env("HF_HUB_VERBOSITY", "info");
+    if disable_xet {
+        download.env("HF_HUB_DISABLE_XET", "1");
+        download.env("HF_HUB_ENABLE_HF_TRANSFER", "0");
+    }
+    run_stage_with_heartbeat_options(
+        app,
+        stage,
+        &mut download,
+        Some(tool_dir.to_path_buf()),
+        None,
+        full_log,
+        StageHeartbeatOptions {
+            interval: Some(Duration::from_secs(20)),
+            no_output_timeout: Some(Duration::from_secs(20 * 60)),
+            include_gpu_status: false,
+            heartbeat_message: "Still downloading model",
+            timeout_message: "Wan2.1 model download produced no output for 20 minutes. The transfer is likely stalled.",
+        },
+        Some(JobProgressRange::new(5.0, 95.0, "Downloading model")),
+    )
+}
+
+fn delete_wan21_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+    let tool_dir = wan21_tool_dir();
+    let workspace = workspace_root();
+    if !tool_dir.starts_with(&workspace) {
+        return Err("Wan2.1 tool folder is outside the workspace.".into());
+    }
+
+    let mut full_log = String::new();
+    if let Some(conda) =
+        find_tool("conda").filter(|path| conda_named_env_ready(path, WAN21_ENV_NAME))
+    {
+        let mut remove_env = Command::new(&conda);
+        remove_env.args(["env", "remove", "--yes", "--name", WAN21_ENV_NAME]);
+        run_stage(
+            &app,
+            "Wan2.1 environment",
+            &mut remove_env,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    } else {
+        full_log.push_str("Wan2.1 Conda environment was not found.\n");
+    }
+
+    if tool_dir.exists() {
+        fs::remove_dir_all(&tool_dir)
+            .map_err(|err| format!("Failed to remove Wan2.1 tool folder: {err}"))?;
+        full_log.push_str(&format!("Removed {}\n", tool_dir.display()));
+    } else {
+        full_log.push_str("Wan2.1 tool folder was not found.\n");
+    }
+
+    emit_progress_detail(
+        &app,
+        "Wan2.1",
+        "Wan2.1 removed.".to_string(),
+        Some(100.0),
+        Some("Removed"),
+    );
+    Ok(JobResult {
+        output_path: tool_dir.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+fn install_or_update_wan22_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    let conda = find_tool("conda")
+        .ok_or("Conda was not found in PATH. Install Miniforge before installing Wan2.2.")?;
+    let git =
+        find_tool("git").ok_or("Git was not found in PATH. Git is needed to install Wan2.2.")?;
+    let tool_dir = wan22_tool_dir();
+    let repo_dir = wan22_repo_dir();
+    fs::create_dir_all(&tool_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(wan22_cache_dir()).map_err(|err| err.to_string())?;
+    fs::create_dir_all(wan22_models_dir()).map_err(|err| err.to_string())?;
+    write_wan22_runtime_files()?;
+
+    let mut full_log = String::new();
+    if repo_dir.join("generate.py").exists() {
+        let mut pull = Command::new(&git);
+        pull.args(["-C"]).arg(&repo_dir).args(["pull", "--ff-only"]);
+        run_stage(&app, "Wan2.2 update", &mut pull, None, None, &mut full_log)?;
+    } else {
+        let mut clone = Command::new(&git);
+        clone.args(["clone", WAN22_REPO_URL]).arg(&repo_dir);
+        run_stage(&app, "Wan2.2 clone", &mut clone, None, None, &mut full_log)?;
+    }
+
+    if !conda_named_env_ready(&conda, WAN22_ENV_NAME) {
+        let mut create = Command::new(&conda);
+        create.args([
+            "create",
+            "--yes",
+            "--name",
+            WAN22_ENV_NAME,
+            "python=3.10",
+            "pip",
+        ]);
+        run_stage(
+            &app,
+            "Wan2.2 environment",
+            &mut create,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    }
+
+    let mut install_torch = Command::new(&conda);
+    install_torch.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        WAN22_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        WAN22_TORCH_VERSION,
+        WAN22_TORCHVISION_VERSION,
+        WAN22_TORCHAUDIO_VERSION,
+        "--index-url",
+        WAN22_TORCH_INDEX_URL,
+    ]);
+    run_stage(
+        &app,
+        "Wan2.2 PyTorch",
+        &mut install_torch,
+        Some(tool_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    let mut install_runtime = Command::new(&conda);
+    install_runtime.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        WAN22_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "opencv-python>=4.9.0.80",
+        "diffusers>=0.31.0",
+        "transformers>=4.49.0,<=4.51.3",
+        "tokenizers>=0.20.3",
+        "accelerate>=1.1.1",
+        "tqdm",
+        "imageio[ffmpeg]",
+        "easydict",
+        "einops",
+        "ftfy",
+        "dashscope",
+        "imageio-ffmpeg",
+        "decord",
+        "peft",
+        "librosa",
+        "safetensors",
+        "regex",
+        "packaging",
+        "ninja",
+        "numpy>=1.23.5,<2",
+        "pillow",
+        "huggingface_hub[hf_xet,cli]",
+        "hf_xet",
+    ]);
+    run_stage(
+        &app,
+        "Wan2.2 runtime",
+        &mut install_runtime,
+        Some(repo_dir.clone()),
+        None,
+        &mut full_log,
+    )?;
+
+    let mut install_flash = Command::new(&conda);
+    install_flash.args([
+        "run",
+        "--no-capture-output",
+        "-n",
+        WAN22_ENV_NAME,
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "flash-attn",
+        "--no-build-isolation",
+    ]);
+    install_flash.env("MAX_JOBS", "2");
+    if let Err(err) = run_stage(
+        &app,
+        "Wan2.2 flash attention",
+        &mut install_flash,
+        Some(repo_dir.clone()),
+        None,
+        &mut full_log,
+    ) {
+        let message = format!("Wan2.2 flash_attn install skipped: {err}");
+        full_log.push_str(&message);
+        full_log.push('\n');
+        emit_progress(&app, "Wan2.2", message);
+    }
+
+    if !wan22_model_ready() {
+        let mut download = Command::new(&conda);
+        download
+            .args([
+                "run",
+                "--no-capture-output",
+                "-n",
+                WAN22_ENV_NAME,
+                "huggingface-cli",
+                "download",
+                WAN22_MODEL_ID,
+                "--local-dir",
+            ])
+            .arg(wan22_model_dir())
+            .args(["--local-dir-use-symlinks", "False"]);
+        add_wan22_cache_env(&mut download);
+        run_stage_with_heartbeat(
+            &app,
+            "Wan2.2 model",
+            &mut download,
+            Some(tool_dir.clone()),
+            None,
+            &mut full_log,
+            Some(Duration::from_secs(20)),
+            Some(JobProgressRange::new(5.0, 95.0, "Downloading model")),
+        )?;
+    }
+
+    let status = wan22_status();
+    if !status.runtime_ready || !status.model_ready {
+        return Err(status.message);
+    }
+
+    emit_progress(
+        &app,
+        "Wan2.2",
+        "Installed Wan2.2 TI2V-5B runtime and model.".to_string(),
+    );
+    Ok(JobResult {
+        output_path: tool_dir.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+fn delete_wan22_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(true, Ordering::SeqCst);
+    let tool_dir = wan22_tool_dir();
+    let workspace = workspace_root();
+    if !tool_dir.starts_with(&workspace) {
+        return Err("Wan2.2 tool folder is outside the workspace.".into());
+    }
+
+    let mut full_log = String::new();
+    if let Some(conda) =
+        find_tool("conda").filter(|path| conda_named_env_ready(path, WAN22_ENV_NAME))
+    {
+        let mut remove_env = Command::new(&conda);
+        remove_env.args(["env", "remove", "--yes", "--name", WAN22_ENV_NAME]);
+        run_stage(
+            &app,
+            "Wan2.2 environment",
+            &mut remove_env,
+            None,
+            None,
+            &mut full_log,
+        )?;
+    } else {
+        full_log.push_str("Wan2.2 Conda environment was not found.\n");
+    }
+
+    if tool_dir.exists() {
+        fs::remove_dir_all(&tool_dir)
+            .map_err(|err| format!("Failed to remove Wan2.2 tool folder: {err}"))?;
+        full_log.push_str(&format!("Removed {}\n", tool_dir.display()));
+    } else {
+        full_log.push_str("Wan2.2 tool folder was not found.\n");
+    }
+
+    emit_progress_detail(
+        &app,
+        "Wan2.2",
+        "Wan2.2 removed.".to_string(),
+        Some(100.0),
+        Some("Removed"),
+    );
+    Ok(JobResult {
+        output_path: tool_dir.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
 async fn install_or_update_supir_xformers(app: tauri::AppHandle) -> Result<JobResult, String> {
     tauri::async_runtime::spawn_blocking(move || install_or_update_supir_xformers_blocking(app))
         .await
         .map_err(|err| format!("SUPIR xFormers install task failed: {err}"))?
 }
 
+#[cfg(target_os = "linux")]
+fn install_or_update_supir_xformers_blocking(app: tauri::AppHandle) -> Result<JobResult, String> { supir::xformers(&app, false) }
+
+#[cfg(not(target_os = "linux"))]
 fn install_or_update_supir_xformers_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
     let conda = find_tool("conda")
         .ok_or("Conda was not found in PATH. Install Miniforge before installing SUPIR.")?;
@@ -2049,6 +3608,10 @@ async fn delete_supir_xformers(app: tauri::AppHandle) -> Result<JobResult, Strin
         .map_err(|err| format!("SUPIR xFormers remove task failed: {err}"))?
 }
 
+#[cfg(target_os = "linux")]
+fn delete_supir_xformers_blocking(app: tauri::AppHandle) -> Result<JobResult, String> { supir::xformers(&app, true) }
+
+#[cfg(not(target_os = "linux"))]
 fn delete_supir_xformers_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
     let conda = find_tool("conda")
         .ok_or("Conda was not found in PATH. Install Miniforge before changing SUPIR.")?;
@@ -2091,6 +3654,10 @@ async fn install_or_update_supir(app: tauri::AppHandle) -> Result<JobResult, Str
         .map_err(|err| format!("SUPIR install task failed: {err}"))?
 }
 
+#[cfg(target_os = "linux")]
+fn install_or_update_supir_blocking(app: tauri::AppHandle) -> Result<JobResult, String> { supir::install(&app) }
+
+#[cfg(not(target_os = "linux"))]
 fn install_or_update_supir_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
     let git = find_tool("git")
         .ok_or("Git was not found in PATH. Install Git before installing SUPIR.")?;
@@ -2341,6 +3908,10 @@ fn update_rife_blocking(
 
 #[tauri::command]
 async fn update_ffmpeg(app: tauri::AppHandle) -> Result<JobResult, String> {
+    if !cfg!(windows) {
+        return Err("Update system FFmpeg and FFprobe with your package manager.".into());
+    }
+
     tauri::async_runtime::spawn_blocking(move || update_ffmpeg_blocking(app))
         .await
         .map_err(|err| format!("FFmpeg update task failed: {err}"))?
@@ -2733,6 +4304,7 @@ fn compare_realesrgan_models_blocking(
     tile_size: String,
     threads: String,
 ) -> Result<ModelCompareResult, String> {
+    let _guard = realesrgan::lock()?;
     let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
     let realesrgan = find_tool("realesrgan-ncnn-vulkan").ok_or("Real-ESRGAN was not found.")?;
     let input_path = PathBuf::from(path);
@@ -2745,12 +4317,8 @@ fn compare_realesrgan_models_blocking(
         return Err("No Real-ESRGAN models were found.".into());
     }
 
-    let temp_dir = workspace_root()
-        .join("temp")
-        .join("jobs")
-        .join("model_compare")
-        .join(timestamp_id());
-    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let temp = tempfile::tempdir().map_err(|e|e.to_string())?;
+    let temp_dir = temp.path();
     let source_frame = temp_dir.join("source.png");
 
     emit_progress(
@@ -2781,7 +4349,8 @@ fn compare_realesrgan_models_blocking(
             .arg("-o")
             .arg(&model_output)
             .arg("-n")
-            .arg(&model.name)
+            .arg(realesrgan::model_argument(&model.name))
+            .arg("-m").arg(realesrgan::root()?.join("models"))
             .arg("-s")
             .arg(&model.scale)
             .arg("-t")
@@ -2851,22 +4420,7 @@ fn update_realesrgan_blocking(
     app: tauri::AppHandle,
     selected_models: Option<Vec<String>>,
 ) -> Result<JobResult, String> {
-    install_github_release_tool(
-        &app,
-        "Update Real-ESRGAN",
-        "xinntao/Real-ESRGAN",
-        "realesrgan-ncnn-vulkan",
-        "realesrgan-ncnn-vulkan.exe",
-        &["realesrgan-ncnn-vulkan", "windows"],
-    )?;
-    if let Some(models) = selected_models.as_ref().filter(|items| !items.is_empty()) {
-        prune_realesrgan_models(models)?;
-    }
-    let tool_path = find_tool("realesrgan-ncnn-vulkan").unwrap_or_default();
-    Ok(JobResult {
-        output_path: tool_path,
-        log: "Real-ESRGAN update finished.".to_string(),
-    })
+    realesrgan::install(&app, selected_models.as_deref().unwrap_or_default())
 }
 
 #[tauri::command]
@@ -2883,6 +4437,9 @@ fn run_upscale_job_blocking(
     app: tauri::AppHandle,
     options: UpscaleOptions,
 ) -> Result<JobResult, String> {
+    let _guard = realesrgan::lock()?;
+    realesrgan::validate_model(&options.model)?;
+    if !options.fps.is_finite() || options.fps <= 0.0 || !options.trim_start.is_finite() || !options.trim_end.is_finite() || options.trim_start < 0.0 || options.trim_end <= options.trim_start { return Err("Invalid video timing or selection".into()); }
     CANCEL_UPSCALE.store(false, Ordering::SeqCst);
     let ffmpeg = find_tool("ffmpeg").ok_or("FFmpeg was not found.")?;
     let realesrgan = find_tool("realesrgan-ncnn-vulkan").ok_or("Real-ESRGAN was not found.")?;
@@ -2897,10 +4454,12 @@ fn run_upscale_job_blocking(
     }
     let output_name = safe_output_filename(&output_name, "upscaled.mp4");
     let output_path = output_dir_for(OutputKind::Video)?.join(output_name);
-    let temp_dir = workspace_root()
-        .join("temp")
-        .join("jobs")
-        .join(format!("tauri_upscale_{}", timestamp_id()));
+    if output_path.exists() && fs::canonicalize(&output_path).ok() == fs::canonicalize(&input_path).ok() {
+        return Err("Choose an output name different from the source video".into());
+    }
+    let staged_output = tempfile::Builder::new().suffix(".mp4").tempfile_in(output_path.parent().ok_or("Invalid output directory")?).map_err(|e|e.to_string())?;
+    let temp = tempfile::tempdir().map_err(|e|e.to_string())?;
+    let temp_dir = temp.path();
     let frames_dir = temp_dir.join("frames");
     let upscaled_dir = temp_dir.join("upscaled_frames");
     fs::create_dir_all(&frames_dir).map_err(|err| err.to_string())?;
@@ -2938,15 +4497,18 @@ fn run_upscale_job_blocking(
         Some("Extracting frames"),
     );
 
+    if extracted_frames == 0 { return Err("No video frames in the selected range".into()); }
     let scale = realesrgan_model_scale(&options.model);
     let mut upscale = Command::new(&realesrgan);
     upscale
+        .arg("-v")
         .arg("-i")
         .arg(&frames_dir)
         .arg("-o")
         .arg(&upscaled_dir)
         .arg("-n")
-        .arg(&options.model)
+        .arg(realesrgan::model_argument(&options.model))
+        .arg("-m").arg(realesrgan::root()?.join("models"))
         .arg("-s")
         .arg(&scale)
         .arg("-t")
@@ -2972,13 +4534,14 @@ fn run_upscale_job_blocking(
         JobProgressRange::new(15.0, 88.0, "Upscaling frames"),
     )?;
 
+    if count_files_with_extension(&upscaled_dir, "png")? != extracted_frames { return Err("Real-ESRGAN did not produce every selected frame. Try a smaller tile size.".into()); }
     let upscaled_pattern = upscaled_dir.join("frame_%08d.png");
     let mut assemble = Command::new(&ffmpeg);
     assemble
         .arg("-hide_banner")
         .arg("-y")
         .arg("-framerate")
-        .arg(format!("{:.3}", options.fps.max(1.0)))
+        .arg(options.fps.to_string())
         .arg("-start_number")
         .arg("1")
         .arg("-i")
@@ -2991,8 +4554,8 @@ fn run_upscale_job_blocking(
         .arg(default_if_empty(&options.crf, "18"))
         .arg("-preset")
         .arg(default_if_empty(&options.encoder_preset, "medium"))
-        .args(["-pix_fmt", "yuv420p", "-c:a", "copy", "-shortest"])
-        .arg(&output_path);
+        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"])
+        .arg(staged_output.path());
     run_stage_progress(
         &app,
         "Reassemble video",
@@ -3003,9 +4566,8 @@ fn run_upscale_job_blocking(
         JobProgressRange::new(88.0, 98.0, "Reassembling video"),
     )?;
 
-    if output_path.exists() {
-        fs::remove_dir_all(&temp_dir).ok();
-    }
+    if CANCEL_UPSCALE.load(Ordering::SeqCst) { return Err("Upscaling cancelled".into()); }
+    staged_output.persist(&output_path).map_err(|e|e.to_string())?;
     emit_progress_detail(
         &app,
         "Done",
@@ -3029,6 +4591,10 @@ async fn run_supir_image_job(
         .map_err(|err| format!("SUPIR image task failed: {err}"))?
 }
 
+#[cfg(target_os = "linux")]
+fn run_supir_image_job_blocking(app: tauri::AppHandle, options: SupirImageOptions) -> Result<JobResult, String> { supir::run_image(app, options) }
+
+#[cfg(not(target_os = "linux"))]
 fn run_supir_image_job_blocking(
     app: tauri::AppHandle,
     options: SupirImageOptions,
@@ -3164,6 +4730,434 @@ fn run_supir_image_job_blocking(
     emit_progress_detail(
         &app,
         "SUPIR",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn run_flux2_image_job(
+    app: tauri::AppHandle,
+    options: Flux2ImageOptions,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_flux2_image_job_blocking(app, options))
+        .await
+        .map_err(|err| format!("Flux.2 image task failed: {err}"))?
+}
+
+fn run_flux2_image_job_blocking(
+    app: tauri::AppHandle,
+    options: Flux2ImageOptions,
+) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
+    let conda = find_tool("conda").ok_or("Conda was not found in PATH.")?;
+    if !conda_named_env_ready(&conda, FLUX2_ENV_NAME) {
+        return Err(
+            "Flux.2 Conda environment is not ready. Install Flux.2 from Image settings first."
+                .into(),
+        );
+    }
+    write_flux2_runtime_files()?;
+
+    let prompt = options.prompt.trim();
+    if prompt.is_empty() {
+        return Err("Flux.2 needs a prompt.".into());
+    }
+    validate_flux2_dimensions(options.width, options.height)?;
+    let reference_paths = validate_flux2_reference_paths(&options.reference_paths)?;
+    let steps = options.steps.clamp(1, 50);
+    let guidance = options.guidance.clamp(0.0, 20.0);
+
+    let output_folder = output_dir_for(OutputKind::Image)?;
+    let output_name = output_image_name(&options.output_name, Path::new("flux2.png"), "flux2");
+    let output_path = unique_output_path(&output_folder, &output_name);
+    let temp_dir = PathBuf::from(get_app_settings()?.temp_folder)
+        .join("jobs")
+        .join(format!("flux2_{}", timestamp_id()));
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let temp_output = temp_dir.join("flux2.png");
+
+    emit_progress_detail(
+        &app,
+        "Flux.2",
+        format!("Generating {}x{} image.", options.width, options.height),
+        Some(5.0),
+        Some("Preparing Flux.2"),
+    );
+    let mut command = Command::new(&conda);
+    command
+        .args(["run", "--no-capture-output", "-n", FLUX2_ENV_NAME, "python"])
+        .arg(flux2_runner_script_path())
+        .arg("--prompt")
+        .arg(prompt)
+        .arg("--output")
+        .arg(&temp_output)
+        .arg("--width")
+        .arg(options.width.to_string())
+        .arg("--height")
+        .arg(options.height.to_string())
+        .arg("--steps")
+        .arg(steps.to_string())
+        .arg("--guidance")
+        .arg(format!("{guidance:.3}"))
+        .arg("--seed")
+        .arg(options.seed.trim())
+        .arg("--model")
+        .arg(FLUX2_MODEL_ID);
+    for reference_path in reference_paths {
+        command.arg("--reference").arg(reference_path);
+    }
+    if options.cpu_offload {
+        command.arg("--cpu-offload");
+    }
+    if let Some(device) = options
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.env("CUDA_VISIBLE_DEVICES", device);
+    }
+    add_flux2_cache_env(&mut command);
+    let settings = get_app_settings()?;
+    let mut runtime_paths = Vec::new();
+    push_existing_runtime_path(&mut runtime_paths, &settings.cuda_bin_folder);
+    push_existing_runtime_path(&mut runtime_paths, &settings.cudnn_bin_folder);
+    prepend_paths_env(&mut command, &runtime_paths);
+
+    let mut full_log = String::new();
+    run_stage_with_heartbeat(
+        &app,
+        "Flux.2",
+        &mut command,
+        Some(flux2_tool_dir()),
+        None,
+        &mut full_log,
+        Some(Duration::from_secs(15)),
+        Some(JobProgressRange::new(10.0, 95.0, "Generating image")),
+    )?;
+
+    if !temp_output.exists() {
+        return Err("Flux.2 did not produce an output image.".into());
+    }
+    emit_progress_detail(
+        &app,
+        "Flux.2",
+        "Saving output image.".to_string(),
+        Some(98.0),
+        Some("Saving output"),
+    );
+    fs::copy(&temp_output, &output_path).map_err(|err| err.to_string())?;
+    fs::remove_dir_all(&temp_dir).ok();
+    emit_progress_detail(
+        &app,
+        "Flux.2",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn run_wan21_video_job(
+    app: tauri::AppHandle,
+    options: Wan21VideoOptions,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_wan21_video_job_blocking(app, options))
+        .await
+        .map_err(|err| format!("Wan2.1 video task failed: {err}"))?
+}
+
+fn run_wan21_video_job_blocking(
+    app: tauri::AppHandle,
+    options: Wan21VideoOptions,
+) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
+    let conda = find_tool("conda").ok_or("Conda was not found in PATH.")?;
+    if !conda_named_env_ready(&conda, WAN21_ENV_NAME) {
+        return Err(
+            "Wan2.1 Conda environment is not ready. Install Wan2.1 from Video settings first."
+                .into(),
+        );
+    }
+    if !wan21_repo_ready() {
+        return Err(
+            "Wan2.1 repo is not installed. Install Wan2.1 from Video settings first.".into(),
+        );
+    }
+    if !wan21_model_ready() {
+        return Err(
+            "Wan2.1 T2V-1.3B model is not installed. Install Wan2.1 from Video settings first."
+                .into(),
+        );
+    }
+    write_wan21_runtime_files()?;
+    let status = wan21_status();
+    if !status.runtime_ready {
+        return Err(
+            "Wan2.1 needs to finish setup before generation. Open Video settings and run Repair / Update Wan2.1."
+                .into(),
+        );
+    }
+
+    let prompt = options.prompt.trim();
+    if prompt.is_empty() {
+        return Err("Wan2.1 needs a prompt.".into());
+    }
+    let size = validate_wan21_size(&options.size, &options.orientation)?;
+    let frame_count = validate_wan21_frame_count(options.frame_count)?;
+    let steps = options.steps.clamp(1, 50);
+    let guidance = options.guidance.clamp(0.0, 20.0);
+
+    let output_folder = output_dir_for(OutputKind::Video)?;
+    let output_name = output_video_name(&options.output_name, "wan21_generate.mp4");
+    let output_path = unique_output_path(&output_folder, &output_name);
+    let temp_dir = PathBuf::from(get_app_settings()?.temp_folder)
+        .join("jobs")
+        .join(format!("wan21_{}", timestamp_id()));
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let temp_output = temp_dir.join("wan21.mp4");
+
+    emit_progress_detail(
+        &app,
+        "Wan2.1",
+        format!("Generating {size} video with {frame_count} frames."),
+        Some(5.0),
+        Some("Preparing Wan2.1"),
+    );
+    let mut command = Command::new(&conda);
+    command
+        .args(["run", "--no-capture-output", "-n", WAN21_ENV_NAME, "python"])
+        .arg(wan21_runner_script_path())
+        .arg("--repo")
+        .arg(wan21_repo_dir())
+        .arg("--ckpt-dir")
+        .arg(wan21_model_dir())
+        .arg("--prompt")
+        .arg(prompt)
+        .arg("--output")
+        .arg(&temp_output)
+        .arg("--size")
+        .arg(size)
+        .arg("--frame-num")
+        .arg(frame_count.to_string())
+        .arg("--steps")
+        .arg(steps.to_string())
+        .arg("--guidance")
+        .arg(format!("{guidance:.3}"))
+        .arg("--seed")
+        .arg(options.seed.trim());
+    if options.offload_model {
+        command.arg("--offload-model");
+    }
+    if options.t5_cpu {
+        command.arg("--t5-cpu");
+    }
+    if let Some(device) = options
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.env("CUDA_VISIBLE_DEVICES", device);
+    }
+    add_wan21_cache_env(&mut command);
+    let settings = get_app_settings()?;
+    let mut runtime_paths = Vec::new();
+    push_existing_runtime_path(&mut runtime_paths, &settings.cuda_bin_folder);
+    push_existing_runtime_path(&mut runtime_paths, &settings.cudnn_bin_folder);
+    prepend_paths_env(&mut command, &runtime_paths);
+
+    let mut full_log = String::new();
+    run_stage_with_heartbeat(
+        &app,
+        "Wan2.1",
+        &mut command,
+        Some(wan21_tool_dir()),
+        None,
+        &mut full_log,
+        Some(Duration::from_secs(20)),
+        Some(JobProgressRange::new(10.0, 95.0, "Generating video")),
+    )?;
+
+    if !temp_output.exists() {
+        return Err("Wan2.1 did not produce an output video.".into());
+    }
+    emit_progress_detail(
+        &app,
+        "Wan2.1",
+        "Saving output video.".to_string(),
+        Some(98.0),
+        Some("Saving output"),
+    );
+    fs::copy(&temp_output, &output_path).map_err(|err| err.to_string())?;
+    fs::remove_dir_all(&temp_dir).ok();
+    emit_progress_detail(
+        &app,
+        "Wan2.1",
+        format!("Output: {}", output_path.display()),
+        Some(100.0),
+        Some("Complete"),
+    );
+    Ok(JobResult {
+        output_path: output_path.to_string_lossy().to_string(),
+        log: full_log,
+    })
+}
+
+#[tauri::command]
+async fn run_wan22_video_job(
+    app: tauri::AppHandle,
+    options: Wan22VideoOptions,
+) -> Result<JobResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_wan22_video_job_blocking(app, options))
+        .await
+        .map_err(|err| format!("Wan2.2 video task failed: {err}"))?
+}
+
+fn run_wan22_video_job_blocking(
+    app: tauri::AppHandle,
+    options: Wan22VideoOptions,
+) -> Result<JobResult, String> {
+    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
+    let conda = find_tool("conda").ok_or("Conda was not found in PATH.")?;
+    if !conda_named_env_ready(&conda, WAN22_ENV_NAME) {
+        return Err(
+            "Wan2.2 Conda environment is not ready. Install Wan2.2 from Video settings first."
+                .into(),
+        );
+    }
+    if !wan22_repo_ready() {
+        return Err(
+            "Wan2.2 repo is not installed. Install Wan2.2 from Video settings first.".into(),
+        );
+    }
+    if !wan22_model_ready() {
+        return Err(
+            "Wan2.2 TI2V-5B model is not installed. Install Wan2.2 from Video settings first."
+                .into(),
+        );
+    }
+    write_wan22_runtime_files()?;
+    let status = wan22_status();
+    if !status.runtime_ready {
+        return Err(
+            "Wan2.2 needs to finish setup before generation. Open Video settings and run Install / Update Wan2.2."
+                .into(),
+        );
+    }
+
+    let prompt = options.prompt.trim();
+    if prompt.is_empty() {
+        return Err("Wan2.2 needs a prompt.".into());
+    }
+    let size = validate_wan22_size(&options.size, &options.orientation)?;
+    let frame_count = validate_wan22_frame_count(options.frame_count)?;
+    let steps = options.steps.clamp(1, 80);
+    let guidance = options.guidance.clamp(0.0, 20.0);
+    let image_path = validate_wan22_image_path(options.image_path.as_deref())?;
+
+    let output_folder = output_dir_for(OutputKind::Video)?;
+    let output_name = output_video_name(&options.output_name, "wan22_generate.mp4");
+    let output_path = unique_output_path(&output_folder, &output_name);
+    let temp_dir = PathBuf::from(get_app_settings()?.temp_folder)
+        .join("jobs")
+        .join(format!("wan22_{}", timestamp_id()));
+    fs::create_dir_all(&temp_dir).map_err(|err| err.to_string())?;
+    let temp_output = temp_dir.join("wan22.mp4");
+
+    emit_progress_detail(
+        &app,
+        "Wan2.2",
+        format!("Generating {size} video with {frame_count} frames."),
+        Some(5.0),
+        Some("Preparing Wan2.2"),
+    );
+    let mut command = Command::new(&conda);
+    command
+        .args(["run", "--no-capture-output", "-n", WAN22_ENV_NAME, "python"])
+        .arg(wan22_runner_script_path())
+        .arg("--repo")
+        .arg(wan22_repo_dir())
+        .arg("--ckpt-dir")
+        .arg(wan22_model_dir())
+        .arg("--prompt")
+        .arg(prompt)
+        .arg("--output")
+        .arg(&temp_output)
+        .arg("--size")
+        .arg(size)
+        .arg("--frame-num")
+        .arg(frame_count.to_string())
+        .arg("--steps")
+        .arg(steps.to_string())
+        .arg("--guidance")
+        .arg(format!("{guidance:.3}"))
+        .arg("--seed")
+        .arg(options.seed.trim());
+    if let Some(image_path) = image_path {
+        command.arg("--image").arg(image_path);
+    }
+    if options.offload_model {
+        command.arg("--offload-model");
+    }
+    if options.convert_model_dtype {
+        command.arg("--convert-model-dtype");
+    }
+    if options.t5_cpu {
+        command.arg("--t5-cpu");
+    }
+    if let Some(device) = options
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.env("CUDA_VISIBLE_DEVICES", device);
+    }
+    add_wan22_cache_env(&mut command);
+    let settings = get_app_settings()?;
+    let mut runtime_paths = Vec::new();
+    push_existing_runtime_path(&mut runtime_paths, &settings.cuda_bin_folder);
+    push_existing_runtime_path(&mut runtime_paths, &settings.cudnn_bin_folder);
+    prepend_paths_env(&mut command, &runtime_paths);
+
+    let mut full_log = String::new();
+    run_stage_with_heartbeat(
+        &app,
+        "Wan2.2",
+        &mut command,
+        Some(wan22_tool_dir()),
+        None,
+        &mut full_log,
+        Some(Duration::from_secs(20)),
+        Some(JobProgressRange::new(10.0, 95.0, "Generating video")),
+    )?;
+
+    if !temp_output.exists() {
+        return Err("Wan2.2 did not produce an output video.".into());
+    }
+    emit_progress_detail(
+        &app,
+        "Wan2.2",
+        "Saving output video.".to_string(),
+        Some(98.0),
+        Some("Saving output"),
+    );
+    fs::copy(&temp_output, &output_path).map_err(|err| err.to_string())?;
+    fs::remove_dir_all(&temp_dir).ok();
+    emit_progress_detail(
+        &app,
+        "Wan2.2",
         format!("Output: {}", output_path.display()),
         Some(100.0),
         Some("Complete"),
@@ -3555,6 +5549,27 @@ impl JobProgressRange {
     }
 }
 
+#[derive(Clone, Copy)]
+struct StageHeartbeatOptions {
+    interval: Option<Duration>,
+    no_output_timeout: Option<Duration>,
+    include_gpu_status: bool,
+    heartbeat_message: &'static str,
+    timeout_message: &'static str,
+}
+
+impl StageHeartbeatOptions {
+    fn standard(interval: Option<Duration>) -> Self {
+        Self {
+            interval,
+            no_output_timeout: None,
+            include_gpu_status: true,
+            heartbeat_message: "Still running",
+            timeout_message: "Command produced no output for too long.",
+        }
+    }
+}
+
 fn run_stage(
     app: &tauri::AppHandle,
     stage: &str,
@@ -3606,6 +5621,29 @@ fn run_stage_with_heartbeat(
     heartbeat_interval: Option<Duration>,
     progress_range: Option<JobProgressRange>,
 ) -> Result<(), String> {
+    run_stage_with_heartbeat_options(
+        app,
+        stage,
+        command,
+        current_dir,
+        frame_total,
+        full_log,
+        StageHeartbeatOptions::standard(heartbeat_interval),
+        progress_range,
+    )
+}
+
+fn run_stage_with_heartbeat_options(
+    app: &tauri::AppHandle,
+    stage: &str,
+    command: &mut Command,
+    current_dir: Option<PathBuf>,
+    frame_total: Option<usize>,
+    full_log: &mut String,
+    heartbeat: StageHeartbeatOptions,
+    progress_range: Option<JobProgressRange>,
+) -> Result<(), String> {
+    shared_runtime::configure(&workspace_root(), command)?;
     if let Some(dir) = current_dir {
         command.current_dir(dir);
     }
@@ -3629,7 +5667,11 @@ fn run_stage_with_heartbeat(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (sender, receiver) = mpsc::channel::<String>();
-    let _frame_total = frame_total;
+    let mut frame_progress = if stage == "Upscale frames" {
+        frame_total.map(upscale_progress::UpscaleFrameProgress::new)
+    } else {
+        None
+    };
 
     if let Some(stream) = stdout {
         stream_lines(stream, sender.clone());
@@ -3646,14 +5688,8 @@ fn run_stage_with_heartbeat(
         while let Ok(line) = receiver.try_recv() {
             if !line.trim().is_empty() {
                 last_output_at = Instant::now();
-                full_log.push_str(&line);
-                full_log.push('\n');
-                emit_progress_detail(
-                    app,
-                    stage,
-                    line,
-                    None,
-                    progress_range.map(|range| range.step),
+                report_stage_output(
+                    app, stage, &line, full_log, progress_range, &mut frame_progress,
                 );
             }
         }
@@ -3668,23 +5704,47 @@ fn run_stage_with_heartbeat(
                 Some(0.0),
                 Some("Cancelled"),
             );
-            return Err("Upscale job cancelled.".into());
+            return Err("Job cancelled.".into());
+        }
+
+        if let Some(timeout) = heartbeat.no_output_timeout {
+            if last_output_at.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                let elapsed = started_at.elapsed().as_secs();
+                let quiet = last_output_at.elapsed().as_secs();
+                let message = format!(
+                    "{} ({elapsed}s elapsed, {quiet}s since last output).",
+                    heartbeat.timeout_message
+                );
+                full_log.push_str(&message);
+                full_log.push('\n');
+                emit_progress_detail(
+                    app,
+                    stage,
+                    message.clone(),
+                    None,
+                    progress_range.map(|range| range.step),
+                );
+                return Err(message);
+            }
         }
 
         if let Some(status) = child
             .try_wait()
             .map_err(|err| format!("{stage} failed while running: {err}"))?
         {
-            for line in receiver.try_iter() {
+            // Wait for both pipe readers to finish so the last saved frames are reported.
+            loop {
+                let line = if frame_progress.is_some() {
+                    receiver.recv().ok()
+                } else {
+                    receiver.try_recv().ok()
+                };
+                let Some(line) = line else { break };
                 if !line.trim().is_empty() {
-                    full_log.push_str(&line);
-                    full_log.push('\n');
-                    emit_progress_detail(
-                        app,
-                        stage,
-                        line,
-                        None,
-                        progress_range.map(|range| range.step),
+                    report_stage_output(
+                        app, stage, &line, full_log, progress_range, &mut frame_progress,
                     );
                 }
             }
@@ -3713,17 +5773,24 @@ fn run_stage_with_heartbeat(
             ));
         }
 
-        if let Some(interval) = heartbeat_interval {
+        if let Some(interval) = heartbeat.interval {
             if last_heartbeat.elapsed() >= interval {
                 let elapsed = started_at.elapsed().as_secs();
                 let quiet = last_output_at.elapsed().as_secs();
-                let gpu_status = gpu_heartbeat_status()
-                    .map(|status| format!(" {status}"))
-                    .unwrap_or_default();
+                let gpu_status = if heartbeat.include_gpu_status {
+                    gpu_heartbeat_status()
+                        .map(|status| format!(" {status}"))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 emit_progress_detail(
                     app,
                     stage,
-                    format!("Still running ({elapsed}s elapsed, {quiet}s since last output).{gpu_status}"),
+                    format!(
+                        "{} ({elapsed}s elapsed, {quiet}s since last output).{gpu_status}",
+                        heartbeat.heartbeat_message
+                    ),
                     None,
                     progress_range.map(|range| range.step),
                 );
@@ -3735,13 +5802,97 @@ fn run_stage_with_heartbeat(
     }
 }
 
+fn report_stage_output(
+    app: &tauri::AppHandle,
+    stage: &str,
+    line: &str,
+    full_log: &mut String,
+    range: Option<JobProgressRange>,
+    frames: &mut Option<upscale_progress::UpscaleFrameProgress>,
+) {
+    let (message, fraction) = if let Some(frames) = frames {
+        let Some(update) = frames.update(line) else { return };
+        update
+    } else {
+        (line.to_string(), None)
+    };
+    full_log.push_str(&message);
+    full_log.push('\n');
+    let progress = fraction
+        .zip(range)
+        .map(|(fraction, range)| range.start + fraction * (range.end - range.start));
+    emit_progress_detail(app, stage, message, progress, range.map(|range| range.step));
+}
+
 fn stream_lines<R: Read + Send + 'static>(stream: R, sender: mpsc::Sender<String>) {
     thread::spawn(move || {
-        let reader = BufReader::new(stream);
-        for line in reader.lines().map_while(Result::ok) {
-            let _ = sender.send(line);
+        let mut reader = BufReader::new(stream);
+        let mut buffer = Vec::new();
+        let mut byte = [0_u8; 1];
+        let mut last_carriage_emit = Instant::now();
+        let mut pending_carriage_return = false;
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) => {
+                    send_stream_buffer(&sender, &mut buffer);
+                    break;
+                }
+                Ok(_) => {
+                    // CRLF is a complete line, not an in-place progress update.
+                    if pending_carriage_return && byte[0] != b'\n' {
+                        if last_carriage_emit.elapsed() >= Duration::from_secs(2) {
+                            send_stream_buffer(&sender, &mut buffer);
+                            last_carriage_emit = Instant::now();
+                        } else {
+                            buffer.clear();
+                        }
+                    }
+                    pending_carriage_return = byte[0] == b'\r';
+                    match byte[0] {
+                        b'\n' => send_stream_buffer(&sender, &mut buffer),
+                        value if value.is_ascii_control() => {}
+                        value => buffer.push(value),
+                    }
+                }
+                Err(_) => {
+                    send_stream_buffer(&sender, &mut buffer);
+                    break;
+                }
+            }
         }
     });
+}
+
+fn send_stream_buffer(sender: &mpsc::Sender<String>, buffer: &mut Vec<u8>) {
+    if buffer.is_empty() {
+        return;
+    }
+    let line = String::from_utf8_lossy(buffer).trim().to_string();
+    buffer.clear();
+    if !line.is_empty() {
+        let _ = sender.send(line);
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn preserves_windows_crlf_frame_completions_and_final_partial_line() {
+        let (sender, receiver) = mpsc::channel();
+        stream_lines(Cursor::new(b"25.00%\r\nin.png -> frame_00000001.png done\r\nlast line"), sender);
+        let lines: Vec<_> = receiver.iter().collect();
+        assert_eq!(lines, ["25.00%", "in.png -> frame_00000001.png done", "last line"]);
+    }
+
+    #[test]
+    fn throttles_carriage_return_updates_without_losing_the_following_line() {
+        let (sender, receiver) = mpsc::channel();
+        stream_lines(Cursor::new(b"10%\r20%\rFinished\n"), sender);
+        assert_eq!(receiver.iter().collect::<Vec<_>>(), ["Finished"]);
+    }
 }
 
 fn gpu_heartbeat_status() -> Option<String> {
@@ -4096,7 +6247,9 @@ fn unzip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
 }
 
 fn app_settings_path() -> PathBuf {
-    workspace_root().join("app_settings.local.json")
+    env::var_os("VIDEOMAXXING_STAGING_PROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("app_settings.local.json"))
 }
 
 fn safe_output_filename(name: &str, fallback: &str) -> String {
@@ -4782,14 +6935,19 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
-    if settings.default_download_folder.trim().is_empty() {
-        settings.default_download_folder = workspace_root()
-            .join("output")
-            .to_string_lossy()
-            .to_string();
+    if settings.default_download_folder.trim().is_empty()
+        || Path::new(&settings.default_download_folder)
+            == workspace_root().join(DEFAULT_OUTPUT_FOLDER)
+    {
+        settings.default_download_folder = DEFAULT_OUTPUT_FOLDER.to_string();
     }
     if settings.temp_folder.trim().is_empty() {
         settings.temp_folder = workspace_root().join("temp").to_string_lossy().to_string();
+    } else if Path::new(&settings.temp_folder).is_relative() {
+        settings.temp_folder = workspace_root()
+            .join(&settings.temp_folder)
+            .to_string_lossy()
+            .to_string();
     }
     if settings.cuda_bin_folder.trim().is_empty() {
         settings.cuda_bin_folder = find_cuda_bin_dir()
@@ -4802,6 +6960,792 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
             .unwrap_or_default();
     }
     settings
+}
+
+fn flux2_tool_dir() -> PathBuf {
+    workspace_root().join("tools").join("flux2")
+}
+
+fn flux2_cache_dir() -> PathBuf {
+    flux2_tool_dir().join("cache")
+}
+
+fn flux2_runner_script_path() -> PathBuf {
+    flux2_tool_dir().join("run_flux2.py")
+}
+
+fn flux2_status_script_path() -> PathBuf {
+    flux2_tool_dir().join("check_flux2.py")
+}
+
+fn write_flux2_runtime_files() -> Result<(), String> {
+    fs::create_dir_all(flux2_tool_dir()).map_err(|err| err.to_string())?;
+    fs::create_dir_all(flux2_cache_dir()).map_err(|err| err.to_string())?;
+    fs::write(flux2_runner_script_path(), FLUX2_RUNNER_SCRIPT.trim_start())
+        .map_err(|err| format!("Failed to write Flux.2 runner: {err}"))?;
+    fs::write(flux2_status_script_path(), FLUX2_STATUS_SCRIPT.trim_start())
+        .map_err(|err| format!("Failed to write Flux.2 status check: {err}"))?;
+    Ok(())
+}
+
+fn add_flux2_cache_env(command: &mut Command) {
+    let cache = flux2_cache_dir();
+    command.env("HF_HOME", &cache);
+    command.env("HF_HUB_CACHE", cache.join("hub"));
+    command.env("TRANSFORMERS_CACHE", cache.join("transformers"));
+}
+
+fn flux2_runtime_ready() -> bool {
+    find_tool("conda")
+        .as_deref()
+        .map(|conda| conda_named_env_ready(conda, FLUX2_ENV_NAME))
+        .unwrap_or(false)
+}
+
+fn flux2_status() -> Flux2Status {
+    let conda = find_tool("conda");
+    let env_ready = conda
+        .as_deref()
+        .map(|path| conda_named_env_ready(path, FLUX2_ENV_NAME))
+        .unwrap_or(false);
+    let mut runtime_ready = false;
+    let mut cuda_ready = false;
+    let mut cuda_label = String::new();
+    let mut torch_version = String::new();
+    let mut diffusers_version = String::new();
+    let mut transformers_version = String::new();
+    let mut accelerate_version = String::new();
+    let mut probe_message = if conda.is_none() {
+        "Conda was not found in PATH.".to_string()
+    } else if !env_ready {
+        format!("Conda env {FLUX2_ENV_NAME} is not ready.")
+    } else {
+        "Flux.2 runtime has not been validated.".to_string()
+    };
+
+    if let Some(conda) = conda.as_deref().filter(|_| env_ready) {
+        let Ok(_) = write_flux2_runtime_files() else {
+            return Flux2Status {
+                state: "needs_setup".to_string(),
+                tool_path: flux2_tool_dir().to_string_lossy().to_string(),
+                env_name: FLUX2_ENV_NAME.to_string(),
+                cache_path: flux2_cache_dir().to_string_lossy().to_string(),
+                current_size_label: format_bytes(dir_size(&flux2_tool_dir())),
+                estimated_install_label: "~12-30 GB depending on cache and model weights"
+                    .to_string(),
+                runtime_ready,
+                cuda_ready,
+                cuda_label,
+                torch_version,
+                diffusers_version,
+                transformers_version,
+                accelerate_version,
+                message: "Could not write Flux.2 runtime validation script.".to_string(),
+            };
+        };
+        let mut probe = Command::new(conda);
+        probe
+            .args(["run", "-n", FLUX2_ENV_NAME, "python"])
+            .arg(flux2_status_script_path());
+        add_flux2_cache_env(&mut probe);
+        let output = shared_runtime::configure(&workspace_root(), &mut probe)
+            .and_then(|_| probe.output().map_err(|err| err.to_string()));
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if let Some(value) = stdout
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+            {
+                runtime_ready = output.status.success()
+                    && value
+                        .get("ready")
+                        .and_then(|item| item.as_bool())
+                        .unwrap_or(false);
+                cuda_ready = value
+                    .get("cudaAvailable")
+                    .and_then(|item| item.as_bool())
+                    .unwrap_or(false);
+                cuda_label = value
+                    .get("cudaName")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(versions) = value.get("versions").and_then(|item| item.as_object()) {
+                    torch_version = versions
+                        .get("torch")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    diffusers_version = versions
+                        .get("diffusers")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    transformers_version = versions
+                        .get("transformers")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    accelerate_version = versions
+                        .get("accelerate")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                probe_message = value
+                    .get("message")
+                    .and_then(|item| item.as_str())
+                    .map(compact_status_message)
+                    .unwrap_or_else(|| "Flux.2 runtime validation finished.".to_string());
+            } else {
+                let combined = format!("{} {}", stdout.trim(), stderr.trim());
+                probe_message = compact_status_message(default_if_empty(
+                    combined.trim(),
+                    "Flux.2 runtime validation did not return a usable result.",
+                ));
+            }
+        } else {
+            probe_message = "Could not run Flux.2 runtime validation.".to_string();
+        }
+    }
+
+    let state = if runtime_ready {
+        "installed"
+    } else if flux2_tool_dir().exists() || env_ready {
+        "needs_setup"
+    } else {
+        "missing"
+    }
+    .to_string();
+    let message = if runtime_ready && cuda_ready {
+        format!(
+            "Flux.2 runtime is ready. CUDA device: {}.",
+            default_if_empty(&cuda_label, "available")
+        )
+    } else if runtime_ready {
+        "Flux.2 runtime is ready, but CUDA was not detected. CPU generation is available but impractical for normal use.".to_string()
+    } else {
+        probe_message
+    };
+
+    Flux2Status {
+        state,
+        tool_path: flux2_tool_dir().to_string_lossy().to_string(),
+        env_name: FLUX2_ENV_NAME.to_string(),
+        cache_path: flux2_cache_dir().to_string_lossy().to_string(),
+        current_size_label: format_bytes(dir_size(&flux2_tool_dir())),
+        estimated_install_label: "~12-30 GB depending on cache and model weights".to_string(),
+        runtime_ready,
+        cuda_ready,
+        cuda_label,
+        torch_version,
+        diffusers_version,
+        transformers_version,
+        accelerate_version,
+        message,
+    }
+}
+
+fn validate_flux2_dimensions(width: u32, height: u32) -> Result<(), String> {
+    if width < 256 || height < 256 {
+        return Err("Flux.2 width and height must be at least 256 pixels.".into());
+    }
+    if width > 2048 || height > 2048 {
+        return Err(
+            "Flux.2 width and height are capped at 2048 pixels for this local runner.".into(),
+        );
+    }
+    if width % 16 != 0 || height % 16 != 0 {
+        return Err("Flux.2 width and height must be multiples of 16.".into());
+    }
+    if u64::from(width) * u64::from(height) > 4_194_304 {
+        return Err("Flux.2 output is capped at 4 megapixels.".into());
+    }
+    Ok(())
+}
+
+fn validate_flux2_reference_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    if paths.len() > 4 {
+        return Err("Flux.2 supports up to 4 reference images.".into());
+    }
+
+    paths
+        .iter()
+        .map(|path| {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Err("Flux.2 reference image path is empty.".to_string());
+            }
+            let reference_path = PathBuf::from(trimmed);
+            if !reference_path.is_file() {
+                return Err(format!(
+                    "Flux.2 reference image was not found: {}",
+                    reference_path.display()
+                ));
+            }
+            Ok(reference_path)
+        })
+        .collect()
+}
+
+fn wan21_tool_dir() -> PathBuf {
+    workspace_root().join("tools").join("wan21")
+}
+
+fn wan21_repo_dir() -> PathBuf {
+    wan21_tool_dir().join("repo")
+}
+
+fn wan21_models_dir() -> PathBuf {
+    wan21_tool_dir().join("models")
+}
+
+fn wan21_model_dir() -> PathBuf {
+    wan21_models_dir().join("Wan2.1-T2V-1.3B")
+}
+
+fn wan21_cache_dir() -> PathBuf {
+    wan21_tool_dir().join("cache")
+}
+
+fn wan21_runner_script_path() -> PathBuf {
+    wan21_tool_dir().join("run_wan21.py")
+}
+
+fn wan21_status_script_path() -> PathBuf {
+    wan21_tool_dir().join("check_wan21.py")
+}
+
+fn write_wan21_runtime_files() -> Result<(), String> {
+    fs::create_dir_all(wan21_tool_dir()).map_err(|err| err.to_string())?;
+    fs::create_dir_all(wan21_cache_dir()).map_err(|err| err.to_string())?;
+    fs::write(wan21_runner_script_path(), WAN21_RUNNER_SCRIPT.trim_start())
+        .map_err(|err| format!("Failed to write Wan2.1 runner: {err}"))?;
+    fs::write(wan21_status_script_path(), WAN21_STATUS_SCRIPT.trim_start())
+        .map_err(|err| format!("Failed to write Wan2.1 status check: {err}"))?;
+    Ok(())
+}
+
+fn add_wan21_cache_env(command: &mut Command) {
+    let cache = wan21_cache_dir();
+    command.env("HF_HOME", &cache);
+    command.env("HF_HUB_CACHE", cache.join("hub"));
+    command.env("TRANSFORMERS_CACHE", cache.join("transformers"));
+}
+
+fn wan21_runtime_ready() -> bool {
+    find_tool("conda")
+        .as_deref()
+        .map(|conda| conda_named_env_ready(conda, WAN21_ENV_NAME))
+        .unwrap_or(false)
+}
+
+fn wan21_repo_ready() -> bool {
+    wan21_repo_dir().join("generate.py").exists()
+}
+
+fn wan21_model_ready() -> bool {
+    let model_dir = wan21_model_dir();
+    model_dir.exists()
+        && find_first_file_with_extension(&model_dir, "safetensors")
+            .or_else(|| find_first_file_with_extension(&model_dir, "pt"))
+            .or_else(|| find_first_file_with_extension(&model_dir, "bin"))
+            .is_some()
+}
+
+fn wan21_status() -> Wan21Status {
+    let conda = find_tool("conda");
+    let env_ready = conda
+        .as_deref()
+        .map(|path| conda_named_env_ready(path, WAN21_ENV_NAME))
+        .unwrap_or(false);
+    let repo_ready = wan21_repo_ready();
+    let model_ready = wan21_model_ready();
+    let mut runtime_ready = false;
+    let mut cuda_ready = false;
+    let mut cuda_label = String::new();
+    let mut torch_version = String::new();
+    let mut transformers_version = String::new();
+    let mut diffusers_version = String::new();
+    let mut accelerate_version = String::new();
+    let mut flash_attn_ready = false;
+    let mut flash_attn_message = String::new();
+    let mut probe_message = if conda.is_none() {
+        "Conda was not found in PATH.".to_string()
+    } else if !repo_ready {
+        "Wan2.1 repo is not installed.".to_string()
+    } else if !env_ready {
+        format!("Conda env {WAN21_ENV_NAME} is not ready.")
+    } else {
+        "Wan2.1 runtime has not been validated.".to_string()
+    };
+
+    if let Some(conda) = conda.as_deref().filter(|_| repo_ready && env_ready) {
+        let Ok(_) = write_wan21_runtime_files() else {
+            return Wan21Status {
+                state: "needs_setup".to_string(),
+                tool_path: wan21_tool_dir().to_string_lossy().to_string(),
+                repo_path: wan21_repo_dir().to_string_lossy().to_string(),
+                model_path: wan21_model_dir().to_string_lossy().to_string(),
+                cache_path: wan21_cache_dir().to_string_lossy().to_string(),
+                env_name: WAN21_ENV_NAME.to_string(),
+                current_size_label: format_bytes(dir_size(&wan21_tool_dir())),
+                estimated_install_label: "~10-25 GB depending on model cache and runtime"
+                    .to_string(),
+                runtime_ready,
+                model_ready,
+                cuda_ready,
+                cuda_label,
+                torch_version,
+                transformers_version,
+                diffusers_version,
+                accelerate_version,
+                flash_attn_ready,
+                flash_attn_message,
+                message: "Could not write Wan2.1 runtime validation script.".to_string(),
+            };
+        };
+        let mut probe = Command::new(conda);
+        probe
+            .args(["run", "-n", WAN21_ENV_NAME, "python"])
+            .arg(wan21_status_script_path());
+        add_wan21_cache_env(&mut probe);
+        let output = shared_runtime::configure(&workspace_root(), &mut probe)
+            .and_then(|_| probe.output().map_err(|err| err.to_string()));
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if let Some(value) = stdout
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+            {
+                runtime_ready = output.status.success()
+                    && value
+                        .get("ready")
+                        .and_then(|item| item.as_bool())
+                        .unwrap_or(false);
+                cuda_ready = value
+                    .get("cudaAvailable")
+                    .and_then(|item| item.as_bool())
+                    .unwrap_or(false);
+                cuda_label = value
+                    .get("cudaName")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                flash_attn_ready = value
+                    .get("flashAttnReady")
+                    .and_then(|item| item.as_bool())
+                    .unwrap_or(false);
+                flash_attn_message = value
+                    .get("flashAttnMessage")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(versions) = value.get("versions").and_then(|item| item.as_object()) {
+                    torch_version = versions
+                        .get("torch")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    transformers_version = versions
+                        .get("transformers")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    diffusers_version = versions
+                        .get("diffusers")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    accelerate_version = versions
+                        .get("accelerate")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                probe_message = value
+                    .get("message")
+                    .and_then(|item| item.as_str())
+                    .map(compact_status_message)
+                    .unwrap_or_else(|| "Wan2.1 runtime validation finished.".to_string());
+            } else {
+                let combined = format!("{} {}", stdout.trim(), stderr.trim());
+                probe_message = compact_status_message(default_if_empty(
+                    combined.trim(),
+                    "Wan2.1 runtime validation did not return a usable result.",
+                ));
+            }
+        } else {
+            probe_message = "Could not run Wan2.1 runtime validation.".to_string();
+        }
+    }
+
+    let state = if runtime_ready && model_ready {
+        "installed"
+    } else if wan21_tool_dir().exists() || repo_ready || env_ready {
+        "needs_setup"
+    } else {
+        "missing"
+    }
+    .to_string();
+    let message = if runtime_ready && model_ready && cuda_ready {
+        format!(
+            "Wan2.1 T2V-1.3B is ready. CUDA device: {}.",
+            default_if_empty(&cuda_label, "available")
+        )
+    } else if runtime_ready && model_ready {
+        "Wan2.1 runtime and model are ready, but CUDA was not detected. CPU generation is not practical for normal use.".to_string()
+    } else if runtime_ready && !model_ready {
+        format!(
+            "Wan2.1 runtime is ready, but model weights are missing at {}.",
+            wan21_model_dir().display()
+        )
+    } else {
+        probe_message
+    };
+
+    Wan21Status {
+        state,
+        tool_path: wan21_tool_dir().to_string_lossy().to_string(),
+        repo_path: wan21_repo_dir().to_string_lossy().to_string(),
+        model_path: wan21_model_dir().to_string_lossy().to_string(),
+        cache_path: wan21_cache_dir().to_string_lossy().to_string(),
+        env_name: WAN21_ENV_NAME.to_string(),
+        current_size_label: format_bytes(dir_size(&wan21_tool_dir())),
+        estimated_install_label: "~10-25 GB depending on model cache and runtime".to_string(),
+        runtime_ready,
+        model_ready,
+        cuda_ready,
+        cuda_label,
+        torch_version,
+        transformers_version,
+        diffusers_version,
+        accelerate_version,
+        flash_attn_ready,
+        flash_attn_message,
+        message,
+    }
+}
+
+fn validate_wan21_size<'a>(size: &'a str, orientation: &str) -> Result<&'a str, String> {
+    let trimmed = size.trim();
+    let expected = match orientation.trim() {
+        "vertical" => "480*832",
+        _ => "832*480",
+    };
+    if trimmed != "832*480" && trimmed != "480*832" {
+        return Err("Wan2.1 size must be 832*480 or 480*832.".into());
+    }
+    if trimmed != expected {
+        return Err(format!(
+            "Wan2.1 {orientation} orientation expects size {expected}."
+        ));
+    }
+    Ok(trimmed)
+}
+
+fn validate_wan21_frame_count(frame_count: u32) -> Result<u32, String> {
+    let clamped = frame_count.clamp(9, 129);
+    if (clamped - 1) % 4 != 0 {
+        return Err("Wan2.1 frame count must follow 4n+1, for example 25, 49, 81, or 129.".into());
+    }
+    Ok(clamped)
+}
+
+fn wan22_tool_dir() -> PathBuf {
+    workspace_root().join("tools").join("wan22")
+}
+
+fn wan22_repo_dir() -> PathBuf {
+    wan22_tool_dir().join("repo")
+}
+
+fn wan22_models_dir() -> PathBuf {
+    wan22_tool_dir().join("models")
+}
+
+fn wan22_model_dir() -> PathBuf {
+    wan22_models_dir().join("Wan2.2-TI2V-5B")
+}
+
+fn wan22_cache_dir() -> PathBuf {
+    wan22_tool_dir().join("cache")
+}
+
+fn wan22_runner_script_path() -> PathBuf {
+    wan22_tool_dir().join("run_wan22.py")
+}
+
+fn wan22_status_script_path() -> PathBuf {
+    wan22_tool_dir().join("check_wan22.py")
+}
+
+fn write_wan22_runtime_files() -> Result<(), String> {
+    fs::create_dir_all(wan22_tool_dir()).map_err(|err| err.to_string())?;
+    fs::create_dir_all(wan22_cache_dir()).map_err(|err| err.to_string())?;
+    fs::write(wan22_runner_script_path(), WAN22_RUNNER_SCRIPT.trim_start())
+        .map_err(|err| format!("Failed to write Wan2.2 runner: {err}"))?;
+    fs::write(wan22_status_script_path(), WAN22_STATUS_SCRIPT.trim_start())
+        .map_err(|err| format!("Failed to write Wan2.2 status check: {err}"))?;
+    Ok(())
+}
+
+fn add_wan22_cache_env(command: &mut Command) {
+    let cache = wan22_cache_dir();
+    command.env("HF_HOME", &cache);
+    command.env("HF_HUB_CACHE", cache.join("hub"));
+    command.env("TRANSFORMERS_CACHE", cache.join("transformers"));
+}
+
+fn wan22_runtime_ready() -> bool {
+    find_tool("conda")
+        .as_deref()
+        .map(|conda| conda_named_env_ready(conda, WAN22_ENV_NAME))
+        .unwrap_or(false)
+}
+
+fn wan22_repo_ready() -> bool {
+    wan22_repo_dir().join("generate.py").exists()
+}
+
+fn wan22_model_ready() -> bool {
+    let model_dir = wan22_model_dir();
+    model_dir.exists()
+        && find_first_file_with_extension(&model_dir, "safetensors")
+            .or_else(|| find_first_file_with_extension(&model_dir, "pt"))
+            .or_else(|| find_first_file_with_extension(&model_dir, "bin"))
+            .is_some()
+}
+
+fn wan22_status() -> Wan22Status {
+    let conda = find_tool("conda");
+    let env_ready = conda
+        .as_deref()
+        .map(|path| conda_named_env_ready(path, WAN22_ENV_NAME))
+        .unwrap_or(false);
+    let repo_ready = wan22_repo_ready();
+    let model_ready = wan22_model_ready();
+    let mut runtime_ready = false;
+    let mut cuda_ready = false;
+    let mut cuda_label = String::new();
+    let mut torch_version = String::new();
+    let mut transformers_version = String::new();
+    let mut diffusers_version = String::new();
+    let mut accelerate_version = String::new();
+    let mut flash_attn_ready = false;
+    let mut flash_attn_message = String::new();
+    let mut probe_message = if conda.is_none() {
+        "Conda was not found in PATH.".to_string()
+    } else if !repo_ready {
+        "Wan2.2 repo is not installed.".to_string()
+    } else if !env_ready {
+        format!("Conda env {WAN22_ENV_NAME} is not ready.")
+    } else {
+        "Wan2.2 runtime has not been validated.".to_string()
+    };
+
+    if let Some(conda) = conda.as_deref().filter(|_| repo_ready && env_ready) {
+        let Ok(_) = write_wan22_runtime_files() else {
+            return Wan22Status {
+                state: "needs_setup".to_string(),
+                tool_path: wan22_tool_dir().to_string_lossy().to_string(),
+                repo_path: wan22_repo_dir().to_string_lossy().to_string(),
+                model_path: wan22_model_dir().to_string_lossy().to_string(),
+                cache_path: wan22_cache_dir().to_string_lossy().to_string(),
+                env_name: WAN22_ENV_NAME.to_string(),
+                current_size_label: format_bytes(dir_size(&wan22_tool_dir())),
+                estimated_install_label: "~25-60 GB depending on model cache and runtime"
+                    .to_string(),
+                runtime_ready,
+                model_ready,
+                cuda_ready,
+                cuda_label,
+                torch_version,
+                transformers_version,
+                diffusers_version,
+                accelerate_version,
+                flash_attn_ready,
+                flash_attn_message,
+                message: "Could not write Wan2.2 runtime validation script.".to_string(),
+            };
+        };
+        let mut probe = Command::new(conda);
+        probe
+            .args(["run", "-n", WAN22_ENV_NAME, "python"])
+            .arg(wan22_status_script_path());
+        add_wan22_cache_env(&mut probe);
+        let output = shared_runtime::configure(&workspace_root(), &mut probe)
+            .and_then(|_| probe.output().map_err(|err| err.to_string()));
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if let Some(value) = stdout
+                .lines()
+                .rev()
+                .find_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+            {
+                runtime_ready = output.status.success()
+                    && value
+                        .get("ready")
+                        .and_then(|item| item.as_bool())
+                        .unwrap_or(false);
+                cuda_ready = value
+                    .get("cudaAvailable")
+                    .and_then(|item| item.as_bool())
+                    .unwrap_or(false);
+                cuda_label = value
+                    .get("cudaName")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                flash_attn_ready = value
+                    .get("flashAttnReady")
+                    .and_then(|item| item.as_bool())
+                    .unwrap_or(false);
+                flash_attn_message = value
+                    .get("flashAttnMessage")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(versions) = value.get("versions").and_then(|item| item.as_object()) {
+                    torch_version = versions
+                        .get("torch")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    transformers_version = versions
+                        .get("transformers")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    diffusers_version = versions
+                        .get("diffusers")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    accelerate_version = versions
+                        .get("accelerate")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                probe_message = value
+                    .get("message")
+                    .and_then(|item| item.as_str())
+                    .map(compact_status_message)
+                    .unwrap_or_else(|| "Wan2.2 runtime validation finished.".to_string());
+            } else {
+                let combined = format!("{} {}", stdout.trim(), stderr.trim());
+                probe_message = compact_status_message(default_if_empty(
+                    combined.trim(),
+                    "Wan2.2 runtime validation did not return a usable result.",
+                ));
+            }
+        } else {
+            probe_message = "Could not run Wan2.2 runtime validation.".to_string();
+        }
+    }
+
+    let state = if runtime_ready && model_ready {
+        "installed"
+    } else if wan22_tool_dir().exists() || repo_ready || env_ready {
+        "needs_setup"
+    } else {
+        "missing"
+    }
+    .to_string();
+    let message = if runtime_ready && model_ready && cuda_ready {
+        format!(
+            "Wan2.2 TI2V-5B is ready. CUDA device: {}.",
+            default_if_empty(&cuda_label, "available")
+        )
+    } else if runtime_ready && model_ready {
+        "Wan2.2 runtime and model are ready, but CUDA was not detected. CPU generation is not practical for normal use.".to_string()
+    } else if runtime_ready && !model_ready {
+        format!(
+            "Wan2.2 runtime is ready, but model weights are missing at {}.",
+            wan22_model_dir().display()
+        )
+    } else {
+        probe_message
+    };
+
+    Wan22Status {
+        state,
+        tool_path: wan22_tool_dir().to_string_lossy().to_string(),
+        repo_path: wan22_repo_dir().to_string_lossy().to_string(),
+        model_path: wan22_model_dir().to_string_lossy().to_string(),
+        cache_path: wan22_cache_dir().to_string_lossy().to_string(),
+        env_name: WAN22_ENV_NAME.to_string(),
+        current_size_label: format_bytes(dir_size(&wan22_tool_dir())),
+        estimated_install_label: "~25-60 GB depending on model cache and runtime".to_string(),
+        runtime_ready,
+        model_ready,
+        cuda_ready,
+        cuda_label,
+        torch_version,
+        transformers_version,
+        diffusers_version,
+        accelerate_version,
+        flash_attn_ready,
+        flash_attn_message,
+        message,
+    }
+}
+
+fn validate_wan22_size<'a>(size: &'a str, orientation: &str) -> Result<&'a str, String> {
+    let trimmed = size.trim();
+    let expected = match orientation.trim() {
+        "vertical" => "704*1280",
+        _ => "1280*704",
+    };
+    if trimmed != "1280*704" && trimmed != "704*1280" {
+        return Err("Wan2.2 size must be 1280*704 or 704*1280.".into());
+    }
+    if trimmed != expected {
+        return Err(format!(
+            "Wan2.2 {orientation} orientation expects size {expected}."
+        ));
+    }
+    Ok(trimmed)
+}
+
+fn validate_wan22_frame_count(frame_count: u32) -> Result<u32, String> {
+    let clamped = frame_count.clamp(25, 241);
+    if (clamped - 1) % 4 != 0 {
+        return Err(
+            "Wan2.2 frame count must follow 4n+1, for example 25, 49, 81, 121, or 241.".into(),
+        );
+    }
+    Ok(clamped)
+}
+
+fn validate_wan22_image_path(path: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let source = PathBuf::from(path);
+    if !source.exists() {
+        return Err("Wan2.2 reference image does not exist.".into());
+    }
+    let valid = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| {
+            matches!(
+                value.to_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "bmp"
+            )
+        })
+        .unwrap_or(false);
+    if !valid {
+        return Err("Wan2.2 reference image must be PNG, JPG, WEBP, or BMP.".into());
+    }
+    Ok(Some(source))
 }
 
 fn facefusion_tool_dir() -> PathBuf {
@@ -4844,6 +7788,7 @@ struct SupirModelSpec {
     direct_download: bool,
 }
 
+#[cfg(not(target_os = "linux"))]
 struct SupirPreset {
     edm_steps: &'static str,
     s_cfg: &'static str,
@@ -4853,6 +7798,10 @@ struct SupirPreset {
     low_vram: bool,
 }
 
+#[cfg(target_os = "linux")]
+fn supir_tool_dir() -> PathBuf { supir::root() }
+
+#[cfg(not(target_os = "linux"))]
 fn supir_tool_dir() -> PathBuf {
     workspace_root().join("tools").join("supir")
 }
@@ -4869,6 +7818,7 @@ fn supir_requirements_path() -> PathBuf {
     supir_tool_dir().join("requirements-videomaxxxing.txt")
 }
 
+#[cfg(not(target_os = "linux"))]
 fn supir_xformers_check_script_path() -> PathBuf {
     supir_tool_dir().join("check_xformers.py")
 }
@@ -4981,6 +7931,7 @@ fn find_downloaded_checkpoint(file_name: &str) -> Option<PathBuf> {
     candidates.pop()
 }
 
+#[cfg(not(target_os = "linux"))]
 fn supir_checkpoints_ready() -> bool {
     supir_sdxl_checkpoint_path().exists()
         && supir_model_specs()
@@ -4989,10 +7940,12 @@ fn supir_checkpoints_ready() -> bool {
             .any(|spec| supir_checkpoint_dir().join(spec.file_name).exists())
 }
 
+#[cfg(not(target_os = "linux"))]
 fn supir_cuda_ready() -> bool {
     find_cuda_bin_dir().is_some() || env::var("CUDA_PATH").is_ok()
 }
 
+#[cfg(not(target_os = "linux"))]
 fn write_supir_xformers_check_script() -> Result<PathBuf, String> {
     fs::create_dir_all(supir_tool_dir()).map_err(|err| err.to_string())?;
     let script_path = supir_xformers_check_script_path();
@@ -5001,6 +7954,7 @@ fn write_supir_xformers_check_script() -> Result<PathBuf, String> {
     Ok(script_path)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn install_supir_xformers_stages(
     app: &tauri::AppHandle,
     conda: &str,
@@ -5073,6 +8027,7 @@ fn compact_status_message(message: &str) -> String {
     format!("{}...", &normalized[..240])
 }
 
+#[cfg(not(target_os = "linux"))]
 fn supir_xformers_probe(conda: &str) -> (bool, String, String) {
     let Ok(script_path) = write_supir_xformers_check_script() else {
         return (
@@ -5132,6 +8087,10 @@ fn supir_xformers_probe(conda: &str) -> (bool, String, String) {
     )
 }
 
+#[cfg(target_os = "linux")]
+fn supir_status() -> SupirStatus { supir::status() }
+
+#[cfg(not(target_os = "linux"))]
 fn supir_status() -> SupirStatus {
     let repo_ready = supir_repo_ready();
     let conda = find_tool("conda");
@@ -5225,10 +8184,12 @@ fn supir_status() -> SupirStatus {
         xformers_ready,
         xformers_version,
         xformers_message,
+        cuda_devices: None,
         message,
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn supir_preset(preset: &str) -> SupirPreset {
     match preset {
         "fidelity" => SupirPreset {
@@ -5401,9 +8362,10 @@ fn conda_env_ready(conda: &str) -> bool {
 }
 
 fn conda_named_env_ready(conda: &str, env_name: &str) -> bool {
-    Command::new(conda)
-        .args(["run", "-n", env_name, "python", "--version"])
-        .output()
+    let mut command = Command::new(conda);
+    command.args(["run", "-n", env_name, "python", "--version"]);
+    shared_runtime::configure(&workspace_root(), &mut command)
+        .and_then(|_| command.output().map_err(|err| err.to_string()))
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
@@ -5567,6 +8529,16 @@ impl StringifyTools for ToolStatus {
 }
 
 fn find_tool(name: &str) -> Option<String> {
+    if name == "realesrgan-ncnn-vulkan" {
+        return realesrgan::executable().map(|p|p.to_string_lossy().into());
+    }
+    if !cfg!(windows) && matches!(name, "ffmpeg" | "ffprobe") {
+        return path_tool_candidates(name)
+            .into_iter()
+            .find(|path| path.is_file())
+            .map(|path| path.to_string_lossy().to_string());
+    }
+
     local_tool_candidates(name)
         .into_iter()
         .chain(path_tool_candidates(name))
@@ -5577,6 +8549,31 @@ fn find_tool(name: &str) -> Option<String> {
 fn find_cudnn_runtime() -> Option<String> {
     find_tool("cudnn64_9.dll")
         .or_else(|| find_cudnn_dll().map(|path| path.to_string_lossy().to_string()))
+}
+
+#[cfg(windows)]
+fn windows_developer_mode_enabled() -> bool {
+    let output = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock",
+            "/v",
+            "AllowDevelopmentWithoutDevLicense",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    stdout.contains("allowdevelopmentwithoutdevlicense") && stdout.contains("0x1")
+}
+
+#[cfg(not(windows))]
+fn windows_developer_mode_enabled() -> bool {
+    false
 }
 
 fn find_cuda_bin_dir() -> Option<PathBuf> {
@@ -5630,15 +8627,6 @@ fn find_file_recursive_limited(root: &Path, file_name: &str, max_depth: usize) -
 fn local_tool_candidates(name: &str) -> Vec<PathBuf> {
     let root = workspace_root();
     match name {
-        "realesrgan-ncnn-vulkan" => vec![
-            root.join("tools")
-                .join("realesrgan-ncnn-vulkan")
-                .join("realesrgan-ncnn-vulkan.exe"),
-            root.join("tools")
-                .join("models")
-                .join("realesrgan-ncnn")
-                .join("realesrgan-ncnn-vulkan.exe"),
-        ],
         "rife-ncnn-vulkan" => vec![root
             .join("tools")
             .join("rife-ncnn-vulkan")
@@ -5688,6 +8676,9 @@ fn rife_model_dirs() -> Result<Vec<PathBuf>, String> {
 }
 
 fn delete_realesrgan_model(model: &str) -> Result<(), String> {
+    let _guard = realesrgan::lock()?;
+    if !realesrgan::valid_name(model) { return Err("Invalid Real-ESRGAN model name".into()); }
+    realesrgan::invalidate();
     let models_dir = realesrgan_models_dir()?;
     for extension in ["param", "bin"] {
         let path = models_dir.join(format!("{model}.{extension}"));
@@ -5710,15 +8701,6 @@ fn delete_rife_model(model: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn prune_realesrgan_models(keep: &[String]) -> Result<(), String> {
-    let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
-    for model in list_realesrgan_models()? {
-        if !keep.contains(&model.name.as_str()) {
-            delete_realesrgan_model(&model.name)?;
-        }
-    }
-    Ok(())
-}
 
 fn prune_rife_models(keep: &[String]) -> Result<(), String> {
     let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
@@ -5824,6 +8806,8 @@ fn create_thumbnail(
     input_path: &Path,
     output_path: &Path,
     time: f64,
+    filter: &str,
+    jpeg_quality: &str,
 ) -> Result<(), String> {
     let fast = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-y", "-ss"])
@@ -5834,9 +8818,9 @@ fn create_thumbnail(
             "-frames:v",
             "1",
             "-vf",
-            "scale=160:-1",
+            filter,
             "-q:v",
-            "4",
+            jpeg_quality,
             "-update",
             "1",
         ])
@@ -5858,9 +8842,9 @@ fn create_thumbnail(
             "-frames:v",
             "1",
             "-vf",
-            "scale=160:-1",
+            filter,
             "-q:v",
-            "4",
+            jpeg_quality,
             "-update",
             "1",
         ])
@@ -6234,6 +9218,58 @@ fn output_image_name(name: &str, input_path: &Path, suffix: &str) -> String {
     }
 }
 
+fn output_video_name(name: &str, fallback: &str) -> String {
+    let cleaned = safe_output_filename(name, fallback);
+    if Path::new(&cleaned)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+    {
+        cleaned
+    } else {
+        let stem = Path::new(&cleaned)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&cleaned);
+        format!("{stem}.mp4")
+    }
+}
+
+fn unique_output_path(folder: &Path, file_name: &str) -> PathBuf {
+    let base_path = folder.join(file_name);
+    if !base_path.exists() {
+        return base_path;
+    }
+
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("output");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty());
+
+    for index in 2..10_000 {
+        let candidate_name = match extension {
+            Some(extension) => format!("{stem}_{index}.{extension}"),
+            None => format!("{stem}_{index}"),
+        };
+        let candidate_path = folder.join(candidate_name);
+        if !candidate_path.exists() {
+            return candidate_path;
+        }
+    }
+
+    let fallback = match extension {
+        Some(extension) => format!("{stem}_{}.{}", timestamp_id(), extension),
+        None => format!("{}_{}", stem, timestamp_id()),
+    };
+    folder.join(fallback)
+}
+
 fn normalized_audio_format(format: &str) -> &'static str {
     match format.trim().to_lowercase().as_str() {
         "wav" => "wav",
@@ -6347,23 +9383,43 @@ fn parse_fps(value: &str) -> f64 {
 pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .manage(audio_models::VideoAudioPreview::default());
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_mcp_bridge::init_with_config(
+            tauri_plugin_mcp_bridge::Config::localhost_only(),
+        ));
+    }
+
+    #[cfg(all(debug_assertions, not(target_os = "linux")))]
     {
         builder = builder.plugin(tauri_plugin_mcp_bridge::init());
     }
 
     builder
+        .setup(|app| {
+            realesrgan::init(app.handle()).map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             detect_tools,
+            probe_tool,
+            probe_tool_storage,
             check_tool_updates,
             detect_facefusion,
             detect_supir,
+            detect_flux2,
+            detect_wan21,
+            detect_wan22,
             get_tool_storage,
             probe_video,
+            video_preview_url,
             probe_audio,
             generate_thumbnails,
+            video_waveform::generate_video_waveform,
+            sample_contact_sheet,
             list_realesrgan_models,
             detect_realesrgan_devices,
             list_rife_models,
@@ -6381,21 +9437,72 @@ pub fn run() {
             save_image_compress_preview,
             run_ffmpeg_job,
             run_audio_job,
+            transcription::transcription_status,
+            transcription::set_transcription_token,
+            transcription::clear_transcription_token,
+            transcription::setup_speaker_detection,
+            transcription::remove_speaker_detection,
+            transcription::detect_transcript_speakers,
+            transcription::setup_transcription,
+            transcription::run_transcription,
+            transcription::cancel_transcription,
+            transcription::save_transcript,
+            transcription::load_transcript,
+            transcription::import_transcript,
+            transcription::export_transcript,
+            subtitle_fonts::list_subtitle_fonts,
+            subtitle_fonts::fontsource_catalog,
+            subtitle_fonts::preview_subtitle_font,
+            subtitle_fonts::install_subtitle_font,
+            subtitle_fonts::install_subtitle_font_system,
+            subtitle_fonts::import_subtitle_font,
+            subtitle_fonts::read_subtitle_font,
+            subtitle_fonts::remove_subtitle_font,
+            video_effects::preview_video_effects,
+            video_effects::cancel_video_effect_preview,
+            caption_export::begin_caption_export,
+            caption_export::append_caption_frame,
+            caption_export::finish_caption_export,
+            caption_export::cancel_caption_export,
+            transcription::remove_transcription,
+            audio_models::audio_model_status,
+            audio_models::manage_audio_model,
+            audio_models::run_audio_model,
+            audio_models::open_audio_project,
+            audio_models::prepare_video_audio,
+            audio_models::audio_playback_url,
+            audio_models::cancel_audio_model,
             run_social_export_job,
             run_upscale_job,
             run_rife_job,
             run_facefusion_job,
+            vosr::install_vosr,
+            vosr::run_vosr_image_job,
+            vosr::run_vosr_skin_job,
+            vosr::detect_vosr_skin_mask,
+            vosr::cancel_vosr,
             run_supir_image_job,
+            run_flux2_image_job,
+            run_wan21_video_job,
+            run_wan22_video_job,
             cancel_upscale_job,
             cancel_audio_job,
             cancel_facefusion_job,
             cancel_supir_image_job,
+            cancel_flux2_image_job,
+            cancel_wan21_video_job,
+            cancel_wan22_video_job,
             import_supir_checkpoint,
             import_supir_checkpoint_from_downloads,
             download_supir_checkpoint,
             delete_supir_checkpoint,
             install_or_update_facefusion,
             install_or_update_supir,
+            install_or_update_flux2,
+            install_or_update_wan21,
+            install_or_update_wan22,
+            delete_wan21,
+            delete_wan22,
             install_or_update_supir_xformers,
             delete_supir_xformers,
             update_ffmpeg,
@@ -6405,6 +9512,9 @@ pub fn run() {
             update_image_codec_tool,
             delete_image_codec_tool,
             update_realesrgan,
+            realesrgan::realesrgan_status,
+            realesrgan::check_realesrgan,
+            realesrgan::uninstall_realesrgan,
             update_rife,
             compare_realesrgan_models
         ])

@@ -1,10 +1,10 @@
 import { useCallback, type RefObject } from "react";
+import { getPreviewRangeState } from "@/lib/media-utils";
 
 type UseVideoTimelineArgs = {
   duration: number;
   previewStart: number;
   previewEnd: number;
-  selectedDuration: number;
   trimStart: number;
   trimEnd: number;
   currentTime: number;
@@ -17,7 +17,6 @@ export function useVideoTimeline({
   duration,
   previewStart,
   previewEnd,
-  selectedDuration,
   trimStart,
   trimEnd,
   currentTime,
@@ -28,11 +27,7 @@ export function useVideoTimeline({
   const visibleStart = Math.max(0, Math.min(previewStart, duration));
   const visibleEnd = Math.max(visibleStart, Math.min(previewEnd || duration, duration));
   const visibleDuration = Math.max(0, visibleEnd - visibleStart);
-  const isPreviewFitted = duration > 0 && (Math.abs(visibleStart) > 0.001 || Math.abs(visibleEnd - duration) > 0.001);
-  const canFitSelection =
-    duration > 0 &&
-    selectedDuration > 0.05 &&
-    (!isPreviewFitted || Math.abs(visibleStart - trimStart) > 0.001 || Math.abs(visibleEnd - trimEnd) > 0.001);
+  const { isPreviewFitted, canFitSelection } = getPreviewRangeState(duration, visibleStart, visibleEnd, trimStart, trimEnd);
   const currentPercent = visibleDuration ? Math.min(100, Math.max(0, ((currentTime - visibleStart) / visibleDuration) * 100)) : 0;
   const trimStartPercent = visibleDuration ? Math.min(100, Math.max(0, ((trimStart - visibleStart) / visibleDuration) * 100)) : 0;
   const trimEndPercent = visibleDuration ? Math.min(100, Math.max(0, ((trimEnd - visibleStart) / visibleDuration) * 100)) : 100;

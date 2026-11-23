@@ -1,5 +1,6 @@
 import { IconButton, PathButton, PrimaryButton, SecondaryButton, SwitchRow } from "@/components/app-controls";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Eraser, Folder, FolderOpen, LayoutDashboard, MonitorCog, Save, Star, UploadCloud } from "lucide-react";
 
 type DetectedDeviceRow = {
   index: number;
@@ -50,15 +51,15 @@ export function GeneralSettings({
         <Tabs value={tab} onValueChange={(value) => onSelectTab(value as "folders" | "devices" | "interface")} className="settings-inner-tabs-wrap">
           <TabsList variant="line" className="settings-inner-tabs" aria-label="General sections">
             <TabsTrigger value="folders">
-              <span className="material-symbols-rounded" aria-hidden="true">folder</span>
+              <Folder className="app-icon" />
               Folders
             </TabsTrigger>
             <TabsTrigger value="devices">
-              <span className="material-symbols-rounded" aria-hidden="true">developer_board</span>
+              <MonitorCog className="app-icon" />
               Devices
             </TabsTrigger>
             <TabsTrigger value="interface">
-              <span className="material-symbols-rounded" aria-hidden="true">dashboard_customize</span>
+              <LayoutDashboard className="app-icon" />
               Interface
             </TabsTrigger>
           </TabsList>
@@ -68,7 +69,7 @@ export function GeneralSettings({
               <section className="folder-settings-section">
                 <h3>Downloads</h3>
                 <PathButton onClick={onChooseDefaultDownloadFolder}>
-                  <span className="material-symbols-rounded" aria-hidden="true">drive_folder_upload</span>
+                  <UploadCloud className="app-icon" />
                   <span>{defaultDownloadFolder || "Choose default download folder"}</span>
                 </PathButton>
               </section>
@@ -77,11 +78,11 @@ export function GeneralSettings({
                 <h3>Temp</h3>
                 <div className="folder-action-row">
                   <PathButton type="button" onClick={onChooseTempFolder}>
-                    <span className="material-symbols-rounded" aria-hidden="true">folder_open</span>
+                    <FolderOpen className="app-icon" />
                     <span>{tempFolder || "Choose temp folder"}</span>
                   </PathButton>
                   <SecondaryButton type="button" className="flush-temp-button" onClick={onFlushTempFolder}>
-                    <span className="material-symbols-rounded" aria-hidden="true">delete_sweep</span>
+                    <Eraser className="app-icon" />
                     Flush Temp
                   </SecondaryButton>
                 </div>
@@ -102,7 +103,7 @@ export function GeneralSettings({
                       aria-label={`Use ${device.name} by default`}
                       onClick={() => onSetPreferredModelDevice(device.id)}
                     >
-                      <span className="material-symbols-rounded" aria-hidden="true">{isPreferred ? "star" : "star"}</span>
+                      {isPreferred ? <Star className="app-icon" /> : <Star className="app-icon" />}
                     </IconButton>
                     <span>{device.index}. {device.name}</span>
                     <span className={`runtime-chip ${device.runtime.toLowerCase().replace(/[^a-z0-9]/g, "-")}`}>{device.runtime}</span>
@@ -134,7 +135,7 @@ export function GeneralSettings({
         </Tabs>
         <div className="settings-save-row">
           <PrimaryButton className={`general-save-button ${hasUnsavedChanges ? "is-dirty" : ""}`} disabled={!hasUnsavedChanges} onClick={onSaveSettings}>
-            <span className="material-symbols-rounded" aria-hidden="true">save</span>
+            <Save className="app-icon" />
             Save General
           </PrimaryButton>
         </div>

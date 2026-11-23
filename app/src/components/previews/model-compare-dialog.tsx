@@ -1,6 +1,7 @@
 import { IconButton, SecondaryButton, SelectControl } from "@/components/app-controls";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import type { useModelCompare } from "@/hooks/use-model-compare";
+import { Columns2, X, ZoomIn, ZoomOut } from "lucide-react";
 
 type ModelPreview = {
   model: string;
@@ -30,28 +31,21 @@ export function ModelCompareDialog({
           </div>
           <div className="modal-head-actions">
             <SecondaryButton type="button" title="Zoom out" onClick={modelCompare.zoomOutCompare}>
-              <span className="material-symbols-rounded" aria-hidden="true">
-                zoom_out
-              </span>
+              <ZoomOut className="app-icon" />
             </SecondaryButton>
             <SecondaryButton type="button" title="Reset zoom" onClick={modelCompare.resetCompareZoom}>
               {Math.round(modelCompare.compareZoom * 100)}%
             </SecondaryButton>
             <SecondaryButton type="button" title="Zoom in" onClick={modelCompare.zoomInCompare}>
-              <span className="material-symbols-rounded" aria-hidden="true">
-                zoom_in
-              </span>
+              <ZoomIn className="app-icon" />
             </SecondaryButton>
             <SelectControl
               value={modelCompare.selectedCompareModel}
               onChange={modelCompare.setSelectedCompareModel}
               disabled={!modelCompare.modelPreviews.length}
-              options={modelCompare.modelPreviews.length ? modelCompare.modelPreviews.map((preview) => ({ value: preview.model, label: `${preview.model} (${preview.scale}x)` })) : [{ value: "", label: "No preview yet", disabled: true }]}
-            />
+              options={modelCompare.modelPreviews.length ? modelCompare.modelPreviews.map((preview) => ({ value: preview.model, label: `${preview.model} (${preview.scale}x)` })) : [{ value: "", label: "No preview yet", disabled: true }]} />
             <IconButton type="button" title="Close compare" onClick={() => modelCompare.setIsCompareOpen(false)}>
-              <span className="material-symbols-rounded" aria-hidden="true">
-                close
-              </span>
+              <X className="app-icon" />
             </IconButton>
           </div>
         </header>
@@ -72,8 +66,7 @@ export function ModelCompareDialog({
               alt="Original frame"
               draggable={false}
               onDragStart={(event) => event.preventDefault()}
-              style={{ transform: modelCompare.compareTransform }}
-            />
+              style={{ transform: modelCompare.compareTransform }} />
           ) : (
             <span>Preparing original...</span>
           )}
@@ -85,16 +78,13 @@ export function ModelCompareDialog({
                 alt={`${modelCompare.selectedComparePreview.model} preview`}
                 draggable={false}
                 onDragStart={(event) => event.preventDefault()}
-                style={{ transform: modelCompare.compareTransform }}
-              />
+                style={{ transform: modelCompare.compareTransform }} />
             </div>
           ) : (
             <span className="compare-right-empty">{modelCompare.isComparingModels ? "Testing models..." : "No model preview"}</span>
           )}
           <div className="compare-divider" style={{ left: `${modelCompare.compareSplit}%` }}>
-            <span className="material-symbols-rounded" aria-hidden="true">
-              compare_arrows
-            </span>
+            <Columns2 className="app-icon" />
           </div>
           <span className="compare-label compare-label-left">Original</span>
           <span className="compare-label compare-label-right">

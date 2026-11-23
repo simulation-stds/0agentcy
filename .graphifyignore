@@ -1,5 +1,22 @@
 # Runtime and dependency folders.
 .git/
+graphify-out/
+graphify-out-windows/
+worktrees/
+private-test-evidence/
+design/screenshots/
+profiles/*.local.json
+shared-runtimes.local.json
+coverage/
+htmlcov/
+.coverage*
+.agents/
+.codex/
+.vscode/
+references/
+reference-analysis/
+vendor/
+data/
 app/node_modules/
 app/dist/
 app/dist-ssr/
@@ -12,9 +29,22 @@ tools/
 logs/
 app_settings.local.json
 .env.local
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cert
+*credentials*
+*secrets*
 
 # Python and local environment artifacts.
 .venv/
+.graphify-venv/
+.comparison-venv/
 __pycache__/
 .pytest_cache/
 .mypy_cache/
@@ -43,3 +73,5 @@ conda-meta/
 *.db
 *.db-shm
 *.db-wal
+
+Identity/Artboard-1.vectorcraft

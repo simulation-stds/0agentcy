@@ -1,3 +1,6 @@
+import { useContext } from "react";
+import { ToolCheckContext } from "@/components/settings/tool-check-context";
+import type { ToolKey } from "@/hooks/use-tool-state";
 import type { ComponentProps, ReactNode } from "react";
 import { AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
@@ -7,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { CircleHelp } from "lucide-react";
 
 const fpsOptions = ["Auto from source", "12", "15", "20", "24", "25", "30", "48", "50", "60", "90", "120"];
 
@@ -24,9 +28,7 @@ export function InfoTooltip({ text }: { text: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="help-icon material-symbols-rounded" aria-label={text} tabIndex={0}>
-          help
-        </span>
+        <CircleHelp className="app-icon help-icon" aria-label={text} tabIndex={0} />
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-[280px]">
         {text}
@@ -131,8 +133,7 @@ export function RangeControl({
         max={max}
         step={step}
         value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
-      />
+        onChange={(event) => onChange(event.currentTarget.value)} />
     </label>
   );
 }
@@ -190,16 +191,21 @@ export function ToolAccordionItem({
   hasModels?: boolean;
   children: ReactNode;
 }) {
+  const loading = useContext(ToolCheckContext);
+  const key = ({ miniforge: "conda", "windows-developer-mode": "windowsDeveloperMode", cuda: "facefusion" } as Record<string, string>)[value] || value;
+  const state = loading?.checks[key];
+  const pending = loading && state !== "checked";
+  const label = state === "failed" ? "Check failed" : state === "checking" ? "Checking..." : "Not checked yet";
   return (
     <AccordionItem value={value} className="tool-dropdown">
       <AccordionTrigger className={`tool-dropdown-head ${hasModels ? "has-models" : "no-models"}`}>
         <strong className="tool-dropdown-head-title">
           {title}
-          {badge}
+          {pending ? <StatusBadge tone="local">{label}</StatusBadge> : badge}
         </strong>
-        <span>{summary}</span>
+        <span>{pending ? label : summary}</span>
       </AccordionTrigger>
-      <AccordionContent className="tool-dropdown-body">{children}</AccordionContent>
+      <AccordionContent className="tool-dropdown-body">{pending ? <div role="status"><p>{label}</p><button type="button" onClick={() => loading.retry(key as ToolKey)}>Check tool</button></div> : children}</AccordionContent>
     </AccordionItem>
   );
 }
@@ -241,7 +247,6 @@ export function FpsSelect({ value, onChange }: { value: string; onChange: (value
     <SelectControl
       value={value}
       onChange={onChange}
-      options={fpsOptions.map((fps) => ({ value: fps === "Auto from source" ? "auto" : fps, label: fps === "Auto from source" ? fps : `${fps} fps` }))}
-    />
+      options={fpsOptions.map((fps) => ({ value: fps === "Auto from source" ? "auto" : fps, label: fps === "Auto from source" ? fps : `${fps} fps` }))} />
   );
 }

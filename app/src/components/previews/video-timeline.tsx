@@ -1,4 +1,4 @@
-import type { PointerEvent, PointerEventHandler, RefObject } from "react";
+import type { CSSProperties, PointerEvent, PointerEventHandler, RefObject } from "react";
 
 type Thumbnail = {
   time: number;
@@ -19,6 +19,7 @@ export function VideoTimeline({
   trimStartPercent,
   trimEndPercent,
   thumbnails,
+  waveformUrl,
   trimStart,
   trimEnd,
   selectedDuration,
@@ -44,6 +45,7 @@ export function VideoTimeline({
   trimStartPercent: number;
   trimEndPercent: number;
   thumbnails: Thumbnail[];
+  waveformUrl: string | null;
   trimStart: number;
   trimEnd: number;
   selectedDuration: number;
@@ -66,7 +68,10 @@ export function VideoTimeline({
         <span>{formatTime(visibleStart + (visibleDuration / 4) * 3)}</span>
         <span>{formatTime(visibleEnd)}</span>
         {hoverPercent !== null && (
-          <div className="timeline-hover" style={{ left: `${hoverPercent}%` }}>
+          <div
+            className="timeline-hover"
+            style={{ "--hover-position": `${hoverPercent}%` } as CSSProperties}
+          >
             {formatTime(timelineHoverTime ?? 0)}
           </div>
         )}
@@ -84,8 +89,7 @@ export function VideoTimeline({
               onPointerMove={onUpdateTrimDrag}
               onPointerUp={onStopTrimDrag}
               onPointerCancel={onStopTrimDrag}
-              aria-label="Drag trim start"
-            />
+              aria-label="Drag trim start" />
             <button
               className="trim-handle trim-handle-end"
               style={{ left: `${trimEndPercent}%` }}
@@ -93,8 +97,7 @@ export function VideoTimeline({
               onPointerMove={onUpdateTrimDrag}
               onPointerUp={onStopTrimDrag}
               onPointerCancel={onStopTrimDrag}
-              aria-label="Drag trim end"
-            />
+              aria-label="Drag trim end" />
           </>
         )}
         <div ref={thumbnailGridRef} className="thumbnail-grid">
@@ -108,6 +111,17 @@ export function VideoTimeline({
             <span>No thumbnails generated yet</span>
           )}
         </div>
+        {waveformUrl && duration > 0 && visibleDuration > 0 && (
+          <svg
+            className="video-waveform-overlay"
+            viewBox={`${(visibleStart / duration) * 1800} 0 ${(visibleDuration / duration) * 1800} 32`}
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="Video audio waveform"
+          >
+            <image href={waveformUrl} width="1800" height="64" />
+          </svg>
+        )}
       </div>
       <div className="selection-summary">
         <span>Selection: {formatTime(trimStart)} - {formatTime(trimEnd)} ({formatTime(selectedDuration)})</span>

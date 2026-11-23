@@ -34,6 +34,10 @@ export function useOutputName({
         ? `upscaled_${selectedScale}x`
         : action === "social_export"
           ? `social_${socialFormat.replace("h264_", "")}`
+          : action === "wan21_generate"
+            ? "wan21"
+          : action === "wan22_generate"
+            ? "wan22"
           : action === "rife_interpolate"
               ? `rife_${rifeMultiplier}x`
               : outputSuffix(action, audioFormat);
@@ -42,7 +46,12 @@ export function useOutputName({
         ? socialExtension(socialFormat)
         : action === "realesrgan_upscale"
           ? ".mp4"
+          : action === "wan21_generate"
+            ? ".mp4"
+          : action === "wan22_generate"
+            ? ".mp4"
           : outputExtension(action, audioFormat);
-    setOutputName(`${baseName(inputPath)}_${suffix}${extension}`);
+    const stem = inputPath.trim() ? baseName(inputPath) : action === "wan21_generate" ? "wan21_generate" : "wan22_generate";
+    setOutputName(`${stem}_${suffix}${extension}`);
   }, [inputPath, action, audioFormat, selectedModel, models, rifeMultiplier, socialFormat, setOutputName]);
 }
