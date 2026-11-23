@@ -93,3 +93,6 @@ shared-runtimes.local.json
 .coverage.*
 htmlcov/
 coverage/
+
+# Editable identity source retained locally pending asset review.
+/Identity/Artboard-1.vectorcraft

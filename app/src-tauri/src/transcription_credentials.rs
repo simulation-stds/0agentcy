@@ -17,7 +17,12 @@ static CREDENTIALS: Mutex<Credentials> = Mutex::new(Credentials {
 fn entry() -> Result<keyring::Entry, String> {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        keyring::Entry::new(SERVICE, ACCOUNT)
+        let service = if std::env::var_os("VIDEOMAXXING_STAGING_PROFILE").is_some() {
+            "Videomaxxing.Staging.WhisperX"
+        } else {
+            SERVICE
+        };
+        keyring::Entry::new(service, ACCOUNT)
             .map_err(|_| "Could not open the system credential store.".into())
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]

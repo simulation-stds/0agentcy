@@ -66,6 +66,10 @@ Graphify, Ollama, DeepSeek, Node.js, Rust, and Visual Studio Build Tools are dev
 
 ## Run From Source
 
+On Ubuntu, run `./run_app.sh` from the project root or open the `Launch Videomaxxing.desktop` shortcut. For worktrees, staging, and validation, see the [workspace workflow](docs/WORKSPACE.md). For source responsibilities, see the [architecture guide](docs/ARCHITECTURE.md).
+
+On Windows:
+
 From the project root:
 
 ```powershell

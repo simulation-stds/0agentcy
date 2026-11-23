@@ -6247,7 +6247,9 @@ fn unzip_archive(zip_path: &Path, destination: &Path) -> Result<(), String> {
 }
 
 fn app_settings_path() -> PathBuf {
-    workspace_root().join("app_settings.local.json")
+    env::var_os("VIDEOMAXXING_STAGING_PROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("app_settings.local.json"))
 }
 
 fn safe_output_filename(name: &str, fallback: &str) -> String {
@@ -6941,6 +6943,11 @@ fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
     }
     if settings.temp_folder.trim().is_empty() {
         settings.temp_folder = workspace_root().join("temp").to_string_lossy().to_string();
+    } else if Path::new(&settings.temp_folder).is_relative() {
+        settings.temp_folder = workspace_root()
+            .join(&settings.temp_folder)
+            .to_string_lossy()
+            .to_string();
     }
     if settings.cuda_bin_folder.trim().is_empty() {
         settings.cuda_bin_folder = find_cuda_bin_dir()
