@@ -55,8 +55,7 @@ export function SocialExportSettings({
             { value: "gif", label: "GIF" },
             { value: "webp", label: "Animated WebP" },
             { value: "apng", label: "Animated PNG" },
-          ]}
-        />
+          ]} />
       </FormRow>
       <FormRow label="FPS" help="Frames per second for the exported social file. Auto uses the source video FPS.">
         <FpsSelect value={socialFps === "auto" ? "auto" : socialFps} onChange={onSetSocialFps} />
@@ -72,8 +71,7 @@ export function SocialExportSettings({
             { value: "lanczos", label: "lanczos" },
             { value: "bicubic", label: "bicubic" },
             { value: "bilinear", label: "bilinear" },
-          ]}
-        />
+          ]} />
       </FormRow>
       {socialFormat === "h264_mp4" ? (
         <>
@@ -89,8 +87,7 @@ export function SocialExportSettings({
                 { value: "slow", label: "slow" },
                 { value: "medium", label: "medium" },
                 { value: "fast", label: "fast" },
-              ]}
-            />
+              ]} />
           </FormRow>
           <SwitchRow checked={socialIncludeAudio} onCheckedChange={onSetSocialIncludeAudio}>
             Include audio
@@ -106,8 +103,7 @@ export function SocialExportSettings({
             step="1"
             value={socialQuality}
             displayValue={socialQuality}
-            onChange={onSetSocialQuality}
-          />
+            onChange={onSetSocialQuality} />
           <SwitchRow checked={socialLoop} onCheckedChange={onSetSocialLoop}>
             Loop animation
           </SwitchRow>

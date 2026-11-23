@@ -1,6 +1,7 @@
 import { PrimaryButton, SecondaryButton, SettingsSection, StatusBadge, ToolAccordionItem } from "@/components/app-controls";
 import { Accordion } from "@/components/ui/accordion";
 import type { FaceFusionStatus, ToolStatus, ToolStorage } from "@/hooks/use-tool-state";
+import { Download, Folder, Globe, RefreshCw, Settings, Trash2 } from "lucide-react";
 
 type MustHaveEnvironmentsSectionProps = {
   tools: ToolStatus | null;
@@ -29,6 +30,7 @@ export function MustHaveEnvironmentsSection({
 }: MustHaveEnvironmentsSectionProps) {
   const gitInstalled = Boolean(tools?.git);
   const condaInstalled = Boolean(tools?.conda);
+  const developerModeEnabled = Boolean(tools?.windowsDeveloperMode);
   const condaStorage = tools?.conda
     ? `Tool folder: ${storageFor("miniforge")?.currentLabel || "Detected"}`
     : `Estimated: ${storageFor("miniforge")?.estimatedInstallLabel || "~700 MB-2 GB"}`;
@@ -44,11 +46,11 @@ export function MustHaveEnvironmentsSection({
         >
           <p>Git is needed to clone and update source-based tools like FaceFusion. For v1, install Git for Windows normally so its SSL, SSH, and helper tools work as expected.</p>
           <div className="tool-dropdown-info">
-            <code title={tools?.git || "Install Git for Windows and make git.exe available on PATH"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{tools?.git || "Missing from PATH"}</code>
+            <code title={tools?.git || "Install Git for Windows and make git.exe available on PATH"}><Folder className="app-icon" />{tools?.git || "Missing from PATH"}</code>
           </div>
           {!gitInstalled && (
             <div className="tool-dropdown-actions external-only">
-              <PrimaryButton onClick={() => onOpenExternalDownload(gitDownloadUrl)}><span className="material-symbols-rounded" aria-hidden="true">public</span>Download</PrimaryButton>
+              <PrimaryButton onClick={() => onOpenExternalDownload(gitDownloadUrl)}><Globe className="app-icon" />Download</PrimaryButton>
             </div>
           )}
         </ToolAccordionItem>
@@ -62,17 +64,32 @@ export function MustHaveEnvironmentsSection({
           <p>Conda creates isolated Python environments for FaceFusion and future Python AI tools. The managed install lives in tools/miniforge and does not need to be added to PATH.</p>
           <p className="settings-note">Environment: {faceFusionStatus?.envName || "videotools-facefusion"}</p>
           <div className="tool-dropdown-info">
-            <code title={tools?.conda || "D:/W2DS/Tools/videomaxxxing/tools/miniforge"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{tools?.conda || "D:/W2DS/Tools/videomaxxxing/tools/miniforge"}</code>
+            <code title={tools?.conda || "D:/W2DS/Tools/videomaxxxing/tools/miniforge"}><Folder className="app-icon" />{tools?.conda || "D:/W2DS/Tools/videomaxxxing/tools/miniforge"}</code>
           </div>
           <div className="tool-dropdown-actions">
             {condaInstalled && hasMiniforgeUpdate && (
-              <SecondaryButton disabled={isUpdatingMiniforge} onClick={onUpdateMiniforge}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update</SecondaryButton>
+              <SecondaryButton disabled={isUpdatingMiniforge} onClick={onUpdateMiniforge}><RefreshCw className="app-icon" />Update</SecondaryButton>
             )}
             {condaInstalled ? (
-              <SecondaryButton disabled><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall</SecondaryButton>
+              <SecondaryButton disabled><Trash2 className="app-icon" />Uninstall</SecondaryButton>
             ) : (
-              <PrimaryButton disabled={isUpdatingMiniforge} onClick={onUpdateMiniforge}><span className="material-symbols-rounded" aria-hidden="true">download</span>Download</PrimaryButton>
+              <PrimaryButton disabled={isUpdatingMiniforge} onClick={onUpdateMiniforge}><Download className="app-icon" />Download</PrimaryButton>
             )}
+          </div>
+        </ToolAccordionItem>
+
+        <ToolAccordionItem
+          value="windows-developer-mode"
+          title="Windows Developer Mode"
+          badge={<StatusBadge tone={developerModeEnabled ? "installed" : "local"}>{developerModeEnabled ? "Activated" : "Deactivated"}</StatusBadge>}
+          summary={null}
+        >
+          <p>Developer Mode lets Hugging Face cache use symlinks, which can reduce duplicate storage for large AI model downloads. The app still works without it, but the cache may use more disk space.</p>
+          <div className="tool-dropdown-info">
+            <code title="Windows Settings > System > For developers > Developer Mode"><Settings className="app-icon" />{developerModeEnabled ? "Developer Mode activated" : "Developer Mode deactivated"}</code>
+          </div>
+          <div className="tool-dropdown-actions external-only">
+            <PrimaryButton onClick={() => onOpenExternalDownload("https://learn.microsoft.com/en-us/windows/advanced-settings/developer-mode")}><Globe className="app-icon" />Guide</PrimaryButton>
           </div>
         </ToolAccordionItem>
       </Accordion>

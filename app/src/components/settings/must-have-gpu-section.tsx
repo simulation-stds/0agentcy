@@ -1,5 +1,6 @@
 import { PathButton, PrimaryButton, SettingsSection, StatusBadge, ToolAccordionItem } from "@/components/app-controls";
 import { Accordion } from "@/components/ui/accordion";
+import { Folder, Globe } from "lucide-react";
 
 type MustHaveGpuSectionProps = {
   expandedTool: string;
@@ -54,11 +55,11 @@ export function MustHaveGpuSection({
             <code>{hasUsableCuda ? "CUDAExecutionProvider available" : "External install recommended"}</code>
           </div>
           <PathButton type="button" onClick={() => onChooseRuntimeFolder("cudaBinFolder")}>
-            <span className="material-symbols-rounded" aria-hidden="true">folder</span>
+            <Folder className="app-icon" />
             <span>{cudaFolderLabel}</span>
           </PathButton>
           <div className="tool-dropdown-actions external-only">
-            <PrimaryButton onClick={() => onOpenExternalDownload(cudaDownloadUrl)}><span className="material-symbols-rounded" aria-hidden="true">public</span>Download</PrimaryButton>
+            <PrimaryButton onClick={() => onOpenExternalDownload(cudaDownloadUrl)}><Globe className="app-icon" />Download</PrimaryButton>
           </div>
         </ToolAccordionItem>
 
@@ -77,11 +78,11 @@ export function MustHaveGpuSection({
             <code>{hasCudnn ? "cudnn64_9.dll detected" : "External install recommended"}</code>
           </div>
           <PathButton type="button" onClick={() => onChooseRuntimeFolder("cudnnBinFolder")}>
-            <span className="material-symbols-rounded" aria-hidden="true">folder</span>
+            <Folder className="app-icon" />
             <span>{cudnnFolderLabel}</span>
           </PathButton>
           <div className="tool-dropdown-actions external-only">
-            <PrimaryButton onClick={() => onOpenExternalDownload(cudnnDownloadUrl)}><span className="material-symbols-rounded" aria-hidden="true">public</span>Download</PrimaryButton>
+            <PrimaryButton onClick={() => onOpenExternalDownload(cudnnDownloadUrl)}><Globe className="app-icon" />Download</PrimaryButton>
           </div>
         </ToolAccordionItem>
       </Accordion>

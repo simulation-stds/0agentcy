@@ -2,11 +2,13 @@ import { IconButton } from "@/components/app-controls";
 import { Button } from "@/components/ui/button";
 import type { ToolCategory } from "@/lib/app-options";
 import logoGreen from "@/assets/logo_green.svg";
+import { Film, Image, Music, Settings } from "lucide-react";
 
 type AppHeaderProps = {
   appVersion: string;
   toolCategory: ToolCategory;
   allServicesAvailable: boolean;
+  toolsChecked: boolean;
   onSetToolCategory: (category: ToolCategory) => void;
   onOpenSettings: () => void;
 };
@@ -15,6 +17,7 @@ export function AppHeader({
   appVersion,
   toolCategory,
   allServicesAvailable,
+  toolsChecked,
   onSetToolCategory,
   onOpenSettings,
 }: AppHeaderProps) {
@@ -26,26 +29,24 @@ export function AppHeader({
       </div>
       <nav className="tool-switcher" aria-label="Tool type">
         <Button className={toolCategory === "video" ? "active" : ""} type="button" onClick={() => onSetToolCategory("video")}>
-          <span className="material-symbols-rounded" aria-hidden="true">movie</span>
+          <Film className="app-icon" />
           Video
         </Button>
         <Button className={toolCategory === "image" ? "active" : ""} type="button" onClick={() => onSetToolCategory("image")}>
-          <span className="material-symbols-rounded" aria-hidden="true">image</span>
+          <Image className="app-icon" />
           Image
         </Button>
         <Button className={toolCategory === "audio" ? "active" : ""} type="button" onClick={() => onSetToolCategory("audio")}>
-          <span className="material-symbols-rounded" aria-hidden="true">music_note</span>
+          <Music className="app-icon" />
           Audio
         </Button>
       </nav>
       <div className="status-row">
-        <span className={allServicesAvailable ? "pill ok" : "pill bad"}>
-          {allServicesAvailable ? "All services available" : "Setup needed"}
+        <span className={!toolsChecked ? "pill" : allServicesAvailable ? "pill ok" : "pill bad"}>
+          {!toolsChecked ? "Tools checked on demand" : allServicesAvailable ? "All services available" : "Setup needed"}
         </span>
         <IconButton type="button" title="App settings" onClick={onOpenSettings}>
-          <span className="material-symbols-rounded" aria-hidden="true">
-            settings
-          </span>
+          <Settings className="app-icon" />
         </IconButton>
       </div>
     </header>

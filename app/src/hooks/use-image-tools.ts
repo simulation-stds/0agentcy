@@ -1,15 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { RealEsrganDevice } from "@/hooks/use-tool-state";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import type { GenerativeReferenceItem } from "@/components/generative-controls";
 import { useDitherActions } from "@/hooks/use-dither-actions";
 import { useImageFileInput } from "@/hooks/use-image-file-input";
 import { useDitherRenderEffect, usePaletteExtractionEffect, type AnimatedImageFrame } from "@/hooks/use-image-render-effects";
 import { usePaletteActions } from "@/hooks/use-palette-actions";
 import { defaultDitherSettings, defaultImageCompressorSettings, defaultPaletteSettings, type DitherSettings, type ImageCompressorSettings, type PaletteResult, type PaletteSettings, type ToolCategory } from "@/lib/app-options";
 import type { DitherViewport } from "@/lib/dither";
-import { recordImageEtaRuntime, type ImageEtaInput } from "@/lib/eta";
+import { computeGenerativeHeight, type GenerativeAspectOrientation } from "@/lib/generative-sizing";
 import { appendTailLog } from "@/lib/job-log";
+import { fileName, localAssetSrc } from "@/lib/media-utils";
 import { defaultModelDevice, resolveModelDevice } from "@/lib/model-devices";
+import type { DetectedSkinMask, SkinCrop, SkinDetectionMode, SkinStroke } from "@/lib/skin-mask";
+import { encodeSkinBlend, encodeVosrBlend, loadSkinBlendImages, loadVosrBlendSource } from "@/lib/vosr-blend";
 
 type JobResult = {
   outputPath: string;
@@ -39,12 +43,13 @@ type GifFrameSet = {
 type UseImageToolsArgs = {
   toolCategory: ToolCategory;
   preferredModelDevice: string;
-  devices: RealEsrganDevice[];
   appendLog: (message: string) => void;
   resetJobProgress: () => void;
 };
 
-export function useImageTools({ toolCategory, preferredModelDevice, devices, appendLog, resetJobProgress }: UseImageToolsArgs) {
+const FLUX2_MAX_REFERENCES = 4;
+
+export function useImageTools({ toolCategory, preferredModelDevice, appendLog, resetJobProgress }: UseImageToolsArgs) {
   const ditherCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const ditherSourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const paletteCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -69,14 +74,50 @@ export function useImageTools({ toolCategory, preferredModelDevice, devices, app
   const [paletteSettings, setPaletteSettings] = useState<PaletteSettings>(defaultPaletteSettings);
   const [paletteResult, setPaletteResult] = useState<PaletteResult | null>(null);
   const [paletteStatus, setPaletteStatus] = useState("Choose an image to extract colors.");
-  const [supirModel, setSupirModel] = useState("SUPIR-v0Q");
-  const [supirPreset, setSupirPreset] = useState("quality");
-  const [supirDevice, setSupirDevice] = useState(defaultModelDevice(preferredModelDevice));
-  const [supirUpscale, setSupirUpscale] = useState("2");
-  const [supirUseLlava, setSupirUseLlava] = useState(false);
-  const [supirStatus, setSupirStatus] = useState("Choose an image to restore with SUPIR.");
-  const [supirOutputPath, setSupirOutputPath] = useState("");
-  const [isRunningSupir, setIsRunningSupir] = useState(false);
+  const [vosrUpscale, setVosrUpscale] = useState("2");
+  const [vosrTileSize, setVosrTileSize] = useState("512");
+  const [vosrBackend, setVosrBackend] = useState("auto");
+  const [vosrColorCorrection, setVosrColorCorrection] = useState("wavelet");
+  const [vosrTileOverlap, setVosrTileOverlap] = useState("64");
+  const [vosrVaeTileSize, setVosrVaeTileSize] = useState("1024");
+  const [vosrVaeTileOverlap, setVosrVaeTileOverlap] = useState("128");
+  const [vosrSeed, setVosrSeed] = useState("42");
+  const [vosrDevice, setVosrDevice] = useState("");
+  const [vosrStatus, setVosrStatus] = useState("Choose a photo to upscale with VOSR 2.0.");
+  const [vosrResult, setVosrResult] = useState<{ path: string; blendSource: string; detailPath?: string } | null>(null);
+  const vosrOutputPath = vosrResult?.path ?? "";
+  const vosrBlendSource = vosrResult?.blendSource ?? "";
+  const vosrDetailPath = vosrResult?.detailPath ?? "";
+  const [vosrCompareDetail, setVosrCompareDetail] = useState(false);
+  const [vosrJob, setVosrJob] = useState<"upscale" | "enhance" | "detect" | null>(null);
+  const isRunningVosr = vosrJob === "upscale";
+  const isEnhancingVosr = vosrJob === "enhance";
+  const isDetectingSkin = vosrJob === "detect";
+  const vosrRunningRef = useRef(false);
+  const vosrResultRevision = useRef(0);
+  const [vosrStrength, setVosrStrength] = useState(100);
+  const [skinStrength, setSkinStrength] = useState(70);
+  const [skinMaskEditing, setSkinMaskEditing] = useState(false);
+  const [skinStrokes, setSkinStrokes] = useState<SkinStroke[]>([]);
+  const [detectedSkinMask, setDetectedSkinMask] = useState<DetectedSkinMask | null>(null);
+  const [skinDetectionMode, setSkinDetectionMode] = useState<SkinDetectionMode>("detail");
+  const [skinCrop, setSkinCrop] = useState<SkinCrop | null>(null);
+  const [skinMaskCoverage, setSkinMaskCoverage] = useState(50);
+  const [isSavingVosrBlend, setIsSavingVosrBlend] = useState(false);
+  const [flux2Prompt, setFlux2Prompt] = useState("");
+  const [flux2AspectOrientation, setFlux2AspectOrientation] = useState<GenerativeAspectOrientation>("horizontal");
+  const [flux2AspectRatio, setFlux2AspectRatio] = useState("1:1");
+  const [flux2Width, setFlux2Width] = useState("1024");
+  const [flux2Height, setFlux2Height] = useState("1024");
+  const [flux2Steps, setFlux2Steps] = useState(4);
+  const [flux2Guidance, setFlux2Guidance] = useState(1);
+  const [flux2Seed, setFlux2Seed] = useState("");
+  const [flux2Device, setFlux2Device] = useState(defaultModelDevice(preferredModelDevice));
+  const [flux2CpuOffload, setFlux2CpuOffload] = useState(true);
+  const [flux2References, setFlux2References] = useState<GenerativeReferenceItem[]>([]);
+  const [flux2Status, setFlux2Status] = useState("Enter a prompt to generate with Flux.2.");
+  const [flux2OutputPath, setFlux2OutputPath] = useState("");
+  const [isRunningFlux2, setIsRunningFlux2] = useState(false);
 
   const {
     imagePath,
@@ -91,9 +132,17 @@ export function useImageTools({ toolCategory, preferredModelDevice, devices, app
     appendLog,
     resetJobProgress,
     onImageLoaded: (loadedLabel) => {
+      vosrResultRevision.current++;
+      setVosrResult(null);
+      setVosrCompareDetail(false);
+      setSkinMaskEditing(false);
+      resetSkinMask();
+      setVosrStrength(100);
+      setVosrStatus("Choose a photo to upscale with VOSR 2.0.");
       setDitherStatus(`Loaded ${loadedLabel}`);
       setPaletteStatus(`Loaded ${loadedLabel}`);
       setCompressorStatus(`Loaded ${loadedLabel}`);
+      setFlux2Status("Enter a prompt to generate with Flux.2.");
       setCompressorOutputPath("");
       setCompressorSizeSummary(null);
       appendLog(`Image ready: ${loadedLabel}`);
@@ -178,7 +227,7 @@ export function useImageTools({ toolCategory, preferredModelDevice, devices, app
   }, [ditherAspectRatio, imageDimensions]);
 
   useEffect(() => {
-    setSupirDevice(defaultModelDevice(preferredModelDevice));
+    setFlux2Device(defaultModelDevice(preferredModelDevice));
   }, [preferredModelDevice]);
 
   useEffect(() => {
@@ -189,6 +238,16 @@ export function useImageTools({ toolCategory, preferredModelDevice, devices, app
     const suffix = imageAction === "palette" ? "palette" : imageAction === "compress" ? "compress" : imageAction;
     setImageOutputName(`${imageName}_${suffix}`);
   }, [imageAction, imageName]);
+
+  useEffect(() => {
+    if (imageAction === "flux2" && !imageName) {
+      setImageOutputName("flux2_generate");
+    }
+  }, [imageAction, imageName]);
+
+  useEffect(() => {
+    setFlux2Height(String(computeGenerativeHeight(flux2Width, flux2AspectRatio)));
+  }, [flux2AspectRatio, flux2Width]);
 
   useEffect(() => {
     setCompressorOutputPath("");
@@ -244,62 +303,351 @@ export function useImageTools({ toolCategory, preferredModelDevice, devices, app
     setPaletteStatus,
   });
 
-  async function runSupir() {
-    if (!imagePath) {
-      setSupirStatus("Choose an image before running SUPIR.");
-      appendLog("SUPIR needs an image file path.");
+  async function runVosr() {
+    if (vosrRunningRef.current || isSavingVosrBlend) return;
+    if (!imagePath || isAnimatedGif) {
+      setVosrStatus("Choose a still image from disk before running VOSR.");
       return;
     }
-    setIsRunningSupir(true);
-    setSupirOutputPath("");
-    setSupirStatus("SUPIR is running.");
+    const seed = Number(vosrSeed);
+    if (!/^\d+$/.test(vosrSeed) || !Number.isInteger(seed) || seed > 4294967295) {
+      setVosrStatus("Enter a whole-number seed between 0 and 4294967295.");
+      return;
+    }
+    const revision = ++vosrResultRevision.current;
+    vosrRunningRef.current = true;
+    setVosrJob("upscale");
+    setVosrResult(null);
+    setVosrCompareDetail(false);
+    setSkinMaskEditing(false);
+    resetSkinMask();
+    setVosrStatus("VOSR 2.0 is upscaling the image.");
     resetJobProgress();
-    appendLog("Starting SUPIR restore...");
-    const startedAt = performance.now();
-    const etaInput = buildImageEtaInput({
-      imageAction,
-      imageDimensions,
-      supirModel,
-      supirPreset,
-      supirDevice,
-      supirUpscale,
-      supirUseLlava,
-      preferredModelDevice,
-      devices,
-    });
+    appendLog("Starting VOSR 2.0 upscale...");
     try {
-      const result = await invoke<JobResult>("run_supir_image_job", {
-        options: {
-          inputPath: imagePath,
-          outputName: imageOutputName,
-          model: supirModel,
-          preset: supirPreset,
-          device: resolveModelDevice(supirDevice, preferredModelDevice),
-          upscale: supirUpscale,
-          useLlava: supirUseLlava,
-        },
-      });
+      const result = await invoke<JobResult>("run_vosr_image_job", { options: {
+        inputPath: imagePath, outputName: imageOutputName,
+        upscale: Number(vosrUpscale), tileSize: Number(vosrTileSize), seed,
+        device: vosrDevice, backend: vosrBackend, colorCorrection: vosrColorCorrection,
+        tileOverlap: Number(vosrTileOverlap), vaeTileSize: Number(vosrVaeTileSize),
+        vaeTileOverlap: Number(vosrVaeTileOverlap),
+      }});
       appendTailLog(appendLog, result.log);
-      recordImageEtaRuntime(etaInput, performance.now() - startedAt);
-      setSupirOutputPath(result.outputPath);
-      setSupirStatus(`SUPIR output: ${result.outputPath}`);
-      appendLog(`SUPIR complete: ${result.outputPath}`);
+      if (revision === vosrResultRevision.current) {
+        setVosrResult({ path: result.outputPath, blendSource: imageSrc });
+        setVosrStrength(100);
+        setVosrStatus(`Saved: ${result.outputPath}`);
+      }
+      appendLog(`VOSR complete: ${result.outputPath}`);
     } catch (error) {
-      const message = String(error).trim();
-      setSupirStatus(`SUPIR failed: ${message}`);
-      appendLog(`SUPIR failed: ${message}`);
+      if (revision === vosrResultRevision.current) setVosrStatus(String(error));
+      appendLog(`VOSR failed: ${String(error)}`);
     } finally {
-      setIsRunningSupir(false);
+      vosrRunningRef.current = false;
+      setVosrJob(null);
     }
   }
 
-  async function cancelSupir() {
+  async function openVosrResult() {
+    if (vosrRunningRef.current || isSavingVosrBlend) return;
+    const revision = ++vosrResultRevision.current;
     try {
-      await invoke("cancel_supir_image_job");
-      setSupirStatus("SUPIR cancellation requested.");
-      appendLog("SUPIR cancellation requested.");
+      const path = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "VOSR result", extensions: ["png"] }],
+      });
+      if (typeof path !== "string" || revision !== vosrResultRevision.current) return;
+      const blendSource = await loadVosrBlendSource(isAnimatedGif ? "" : imageSrc, localAssetSrc(path));
+      if (revision !== vosrResultRevision.current) return;
+      setVosrResult({ path, blendSource });
+      setVosrCompareDetail(false);
+      setSkinMaskEditing(false);
+      resetSkinMask();
+      setVosrStrength(100);
+      setVosrStatus(`Opened: ${path}`);
     } catch (error) {
-      appendLog(`SUPIR cancel failed: ${String(error).trim()}`);
+      if (revision === vosrResultRevision.current) setVosrStatus(String(error));
+    }
+  }
+
+  async function openSkinResult() {
+    if (!vosrResult || vosrRunningRef.current || isSavingVosrBlend) return;
+    const revision = ++vosrResultRevision.current;
+    try {
+      const path = await openDialog({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Skin Enhance result", extensions: ["png"] }],
+      });
+      if (typeof path !== "string" || revision !== vosrResultRevision.current) return;
+      await loadSkinBlendImages(localAssetSrc(vosrResult.path), localAssetSrc(path));
+      if (revision !== vosrResultRevision.current) return;
+      setVosrResult({ ...vosrResult, detailPath: path });
+      setSkinStrength(100);
+      setSkinMaskEditing(false);
+      setVosrCompareDetail(true);
+      setVosrStatus(`Opened Skin Enhance result: ${path}`);
+    } catch (error) {
+      if (revision === vosrResultRevision.current) setVosrStatus(String(error));
+    }
+  }
+
+  async function saveVosrBlend(kind: "vosr" | "skin") {
+    if (isSavingVosrBlend || vosrRunningRef.current) return;
+    const detail = kind === "skin";
+    const baseSrc = detail ? localAssetSrc(vosrOutputPath) : vosrBlendSource;
+    const resultPath = detail ? vosrDetailPath : vosrOutputPath;
+    if (!baseSrc || !resultPath) return;
+    const revision = vosrResultRevision.current;
+    const strength = detail ? skinStrength : vosrStrength;
+    const model = detail ? "Skin Enhance" : "VOSR";
+    const encode = detail ? encodeSkinBlend : encodeVosrBlend;
+    const outputName = `${fileName(resultPath).replace(/\.png$/i, "")}_blend-${strength}.png`;
+    setIsSavingVosrBlend(true);
+    try {
+      const dataUrl = await encode(baseSrc, localAssetSrc(resultPath), strength);
+      const result = await invoke<JobResult>("save_data_url_to_downloads", {
+        outputName, dataUrl, preserveExisting: true,
+      });
+      if (revision === vosrResultRevision.current) setVosrStatus(`Saved ${strength}% ${model} blend: ${result.outputPath}`);
+      appendLog(`Saved ${model} blend (${strength}%): ${result.outputPath}`);
+    } catch (error) {
+      const message = `Could not save ${model} blend: ${String(error)}`;
+      if (revision === vosrResultRevision.current) setVosrStatus(message);
+      appendLog(message);
+    } finally {
+      setIsSavingVosrBlend(false);
+    }
+  }
+
+  function clearSkinMask() {
+    setDetectedSkinMask(null);
+    setSkinStrokes([]);
+  }
+
+  function resetSkinMask() {
+    clearSkinMask();
+    setSkinCrop(null);
+    setSkinMaskCoverage(50);
+  }
+
+  async function detectSkinMask() {
+    if (!vosrResult || vosrRunningRef.current || isSavingVosrBlend) return;
+    const revision = ++vosrResultRevision.current;
+    vosrRunningRef.current = true;
+    setVosrJob("detect");
+    setVosrStatus("Detecting skin with Stars Speck on CPU.");
+    resetJobProgress();
+    try {
+      const mask = await invoke<DetectedSkinMask>("detect_vosr_skin_mask", {
+        inputPath: vosrResult.path,
+        mode: skinDetectionMode,
+        crop: skinCrop,
+      });
+      if (revision === vosrResultRevision.current) {
+        setDetectedSkinMask(mask);
+        setVosrStatus("Skin detected. Refine the selection with the brush or eraser.");
+      }
+      appendLog("Skin mask ready.");
+    } catch (error) {
+      const message = String(error);
+      if (revision === vosrResultRevision.current) setVosrStatus(message);
+      appendLog(`Skin detection failed: ${message}`);
+    } finally {
+      vosrRunningRef.current = false;
+      setVosrJob(null);
+    }
+  }
+
+  async function enhanceVosrSkin() {
+    if (!vosrResult || vosrRunningRef.current || isSavingVosrBlend) return;
+    if (!detectedSkinMask && !skinStrokes.some(stroke => !stroke.erase)) return;
+    const revision = ++vosrResultRevision.current;
+    vosrRunningRef.current = true;
+    setVosrJob("enhance");
+    setVosrStatus("Enhancing skin texture.");
+    resetJobProgress();
+    appendLog(`Skin Enhance: ${vosrResult.path}`);
+    try {
+      const result = await invoke<JobResult>("run_vosr_skin_job", {
+        inputPath: vosrResult.path,
+        device: vosrDevice,
+        strokes: skinStrokes,
+        autoMask: detectedSkinMask?.dataUrl ?? null,
+        maskBounds: detectedSkinMask?.bounds ?? null,
+        maskCoverage: skinMaskCoverage,
+      });
+      appendTailLog(appendLog, result.log);
+      if (revision === vosrResultRevision.current) {
+        setVosrResult({ ...vosrResult, detailPath: result.outputPath });
+        setSkinStrength(70);
+        setSkinMaskEditing(false);
+        setVosrCompareDetail(true);
+        setVosrStatus(`Skin enhancement saved: ${result.outputPath}`);
+      }
+      appendLog(`Skin Enhance complete: ${result.outputPath}`);
+    } catch (error) {
+      const message = String(error);
+      if (revision === vosrResultRevision.current) setVosrStatus(message);
+      appendLog(`Skin Enhance failed: ${message}`);
+    } finally {
+      vosrRunningRef.current = false;
+      setVosrJob(null);
+    }
+  }
+
+  async function cancelVosr() {
+    try {
+      await invoke("cancel_vosr");
+      setVosrStatus("Cancellation requested.");
+    } catch (error) { appendLog(`VOSR cancel failed: ${String(error)}`); }
+  }
+
+  async function runFlux2() {
+    if (!flux2Prompt.trim()) {
+      setFlux2Status("Enter a prompt before running Flux.2.");
+      appendLog("Flux.2 needs a prompt.");
+      return;
+    }
+    setIsRunningFlux2(true);
+    setFlux2OutputPath("");
+    setFlux2Status("Flux.2 is running.");
+    resetJobProgress();
+    appendLog("Starting Flux.2 generation...");
+    try {
+      const result = await invoke<JobResult>("run_flux2_image_job", {
+        options: {
+          prompt: flux2Prompt,
+          outputName: imageOutputName || "flux2_generate",
+          width: Number(flux2Width),
+          height: Number(flux2Height),
+          steps: flux2Steps,
+          guidance: flux2Guidance,
+          seed: flux2Seed,
+          referencePaths: flux2References.map((reference) => reference.path),
+          device: resolveModelDevice(flux2Device, preferredModelDevice),
+          cpuOffload: flux2CpuOffload,
+        },
+      });
+      appendTailLog(appendLog, result.log);
+      setFlux2OutputPath(result.outputPath);
+      setFlux2Status(`Flux.2 output: ${result.outputPath}`);
+      appendLog(`Flux.2 complete: ${result.outputPath}`);
+    } catch (error) {
+      const message = String(error).trim();
+      setFlux2Status(`Flux.2 failed: ${message}`);
+      appendLog(`Flux.2 failed: ${message}`);
+    } finally {
+      setIsRunningFlux2(false);
+    }
+  }
+
+  async function addFlux2References() {
+    const selected = await openDialog({
+      multiple: true,
+      directory: false,
+      filters: [
+        {
+          name: "Image",
+          extensions: ["png", "jpg", "jpeg", "gif", "bmp", "webp", "avif", "apng"],
+        },
+      ],
+    });
+    const paths = Array.isArray(selected) ? selected : typeof selected === "string" ? [selected] : [];
+    addFlux2ReferencePaths(paths);
+  }
+
+  function handleFlux2ReferenceDrop(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files) as Array<File & { path?: string }>;
+    if (!files.length) return;
+
+    const imageFiles = files.filter((file) => file.type.startsWith("image/") || /\.(png|jpe?g|gif|bmp|webp|avif|apng)$/i.test(file.name));
+    if (!imageFiles.length) {
+      setFlux2Status("Dropped files are not images.");
+      appendLog("Flux.2 references need image files.");
+      return;
+    }
+
+    const paths = imageFiles.map((file) => file.path || "").filter(Boolean);
+    if (!paths.length) {
+      setFlux2Status("Drop needs local image files. Use Browse image(s) if needed.");
+      appendLog("Flux.2 reference drop did not provide local file paths.");
+      return;
+    }
+
+    addFlux2ReferencePaths(paths);
+  }
+
+  function useCurrentImageAsFlux2Reference() {
+    if (!imagePath) {
+      setFlux2Status("Choose a local image before using it as a reference.");
+      appendLog("Flux.2 reference needs a local image path.");
+      return;
+    }
+    addFlux2ReferencePaths([imagePath]);
+  }
+
+  function addFlux2ReferencePaths(paths: string[]) {
+    if (!paths.length) return;
+
+    const existing = new Set(flux2References.map((reference) => normalizeReferencePath(reference.path)));
+    const nextReferences: GenerativeReferenceItem[] = [];
+    for (const path of paths) {
+      const trimmed = path.trim();
+      if (!trimmed) continue;
+      const normalized = normalizeReferencePath(trimmed);
+      if (existing.has(normalized)) continue;
+      existing.add(normalized);
+      nextReferences.push({
+        id: `${Date.now()}_${nextReferences.length}_${Math.random().toString(36).slice(2)}`,
+        path: trimmed,
+        name: fileName(trimmed),
+        src: localAssetSrc(trimmed),
+      });
+    }
+
+    if (!nextReferences.length) {
+      setFlux2Status("Reference image is already added.");
+      appendLog("Flux.2 reference already added.");
+      return;
+    }
+
+    const availableSlots = Math.max(0, FLUX2_MAX_REFERENCES - flux2References.length);
+    if (!availableSlots) {
+      setFlux2Status(`Flux.2 supports up to ${FLUX2_MAX_REFERENCES} reference images.`);
+      appendLog(`Flux.2 reference limit reached: ${FLUX2_MAX_REFERENCES}.`);
+      return;
+    }
+
+    const accepted = nextReferences.slice(0, availableSlots);
+    setFlux2References([...flux2References, ...accepted]);
+    setFlux2Status(`${accepted.length} reference image${accepted.length === 1 ? "" : "s"} added.`);
+    appendLog(`Flux.2 references added: ${accepted.map((reference) => reference.name).join(", ")}`);
+    if (nextReferences.length > availableSlots) {
+      setFlux2Status(`Flux.2 kept the first ${FLUX2_MAX_REFERENCES} reference images.`);
+      appendLog(`Flux.2 supports up to ${FLUX2_MAX_REFERENCES} references; extra images were skipped.`);
+    }
+  }
+
+  function removeFlux2Reference(id: string) {
+    setFlux2References((current) => current.filter((reference) => reference.id !== id));
+    setFlux2Status("Reference image removed.");
+  }
+
+  function clearFlux2References() {
+    setFlux2References([]);
+    setFlux2Status("Reference images cleared.");
+  }
+
+  async function cancelFlux2() {
+    try {
+      await invoke("cancel_flux2_image_job");
+      setFlux2Status("Flux.2 cancellation requested.");
+      appendLog("Flux.2 cancellation requested.");
+    } catch (error) {
+      appendLog(`Flux.2 cancel failed: ${String(error).trim()}`);
     }
   }
 
@@ -473,24 +821,51 @@ export function useImageTools({ toolCategory, preferredModelDevice, devices, app
     paletteSettings,
     paletteResult,
     paletteStatus,
-    supirModel,
-    supirPreset,
-    supirDevice,
-    supirUpscale,
-    supirUseLlava,
-    supirStatus,
-    supirOutputPath,
-    isRunningSupir,
+    vosrUpscale, setVosrUpscale, vosrTileSize, setVosrTileSize,
+    vosrSeed, setVosrSeed, vosrDevice, setVosrDevice,
+    vosrBackend, setVosrBackend, vosrColorCorrection, setVosrColorCorrection,
+    vosrTileOverlap, setVosrTileOverlap, vosrVaeTileSize, setVosrVaeTileSize,
+    vosrVaeTileOverlap, setVosrVaeTileOverlap,
+    vosrStatus, vosrOutputPath, isRunningVosr, runVosr, cancelVosr,
+    vosrStrength, setVosrStrength, openVosrResult, vosrBlendSource, isSavingVosrBlend, saveVosrBlend,
+    vosrDetailPath, vosrCompareDetail, setVosrCompareDetail, isEnhancingVosr, enhanceVosrSkin,
+    skinStrength, setSkinStrength, openSkinResult,
+    skinMaskEditing, setSkinMaskEditing, skinStrokes, setSkinStrokes,
+    detectedSkinMask, detectSkinMask, clearSkinMask, isDetectingSkin,
+    skinDetectionMode, setSkinDetectionMode, skinCrop, setSkinCrop, skinMaskCoverage, setSkinMaskCoverage,
+    flux2Prompt,
+    flux2AspectOrientation,
+    flux2AspectRatio,
+    flux2Width,
+    flux2Height,
+    flux2Steps,
+    flux2Guidance,
+    flux2Seed,
+    flux2Device,
+    flux2CpuOffload,
+    flux2References,
+    flux2Status,
+    flux2OutputPath,
+    isRunningFlux2,
     setImageAction,
     setImageOutputName,
     setDitherComparePreview,
     updateCompressorSettings,
     setDitherViewport,
-    setSupirModel,
-    setSupirPreset,
-    setSupirDevice,
-    setSupirUpscale,
-    setSupirUseLlava,
+    setFlux2Prompt,
+    setFlux2AspectOrientation,
+    setFlux2AspectRatio,
+    setFlux2Width,
+    setFlux2Steps,
+    setFlux2Guidance,
+    setFlux2Seed,
+    setFlux2Device,
+    setFlux2CpuOffload,
+    addFlux2References,
+    handleFlux2ReferenceDrop,
+    useCurrentImageAsFlux2Reference,
+    removeFlux2Reference,
+    clearFlux2References,
     chooseInputImage,
     handleImageDrop,
     updateDitherSettings,
@@ -504,41 +879,11 @@ export function useImageTools({ toolCategory, preferredModelDevice, devices, app
     copyPaletteCss,
     downloadPaletteCss,
     downloadPaletteSheet,
-    runSupir,
-    cancelSupir,
+    runFlux2,
+    cancelFlux2,
   };
 }
 
-function buildImageEtaInput({
-  imageAction,
-  imageDimensions,
-  supirModel,
-  supirPreset,
-  supirDevice,
-  supirUpscale,
-  supirUseLlava,
-  preferredModelDevice,
-  devices,
-}: {
-  imageAction: string;
-  imageDimensions: ImageEtaInput["dimensions"];
-  supirModel: string;
-  supirPreset: string;
-  supirDevice: string;
-  supirUpscale: string;
-  supirUseLlava: boolean;
-  preferredModelDevice: string;
-  devices: RealEsrganDevice[];
-}): ImageEtaInput {
-  return {
-    imageAction,
-    dimensions: imageDimensions,
-    supirModel,
-    supirPreset,
-    supirDevice,
-    supirUpscale,
-    supirUseLlava,
-    preferredModelDevice,
-    devices,
-  };
+function normalizeReferencePath(path: string) {
+  return path.trim().replace(/\\/g, "/").toLowerCase();
 }

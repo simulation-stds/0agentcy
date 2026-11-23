@@ -28,13 +28,6 @@ export type VideoEtaInput = {
 export type ImageEtaInput = {
   imageAction: string;
   dimensions: Dimensions | null;
-  supirModel: string;
-  supirPreset: string;
-  supirDevice: string;
-  supirUpscale: string;
-  supirUseLlava: boolean;
-  preferredModelDevice: string;
-  devices: RealEsrganDevice[];
 };
 
 export type AudioEtaInput = {
@@ -76,6 +69,22 @@ export function formatEtaDuration(milliseconds: number | null) {
 }
 
 export function estimateVideoEta(input: VideoEtaInput): EtaEstimate {
+  if (input.action === "wan21_generate") {
+    return {
+      milliseconds: null,
+      label: "Wan2.1",
+      detail: "Local 480p video generation depends heavily on GPU VRAM, frame count, and sampling steps.",
+    };
+  }
+
+  if (input.action === "wan22_generate") {
+    return {
+      milliseconds: null,
+      label: "Wan2.2",
+      detail: "Local video generation depends heavily on GPU VRAM, frame count, and sampling steps.",
+    };
+  }
+
   if (!input.metadata) {
     return emptyEta("Video", "Load a video to estimate runtime.");
   }
@@ -196,26 +205,9 @@ export function estimateImageEta(input: ImageEtaInput): EtaEstimate {
     };
   }
 
-  if (input.imageAction !== "supir") {
-    return emptyEta("Image", "Choose an action to estimate runtime.");
-  }
+  if (input.imageAction === "vosr") return emptyEta("VOSR 2.0", "Runtime depends on output size, tiling and GPU. No measured estimate yet.");
 
-  const megapixels = megapixelsFromDimensions(input.dimensions);
-  const upscale = Math.max(1, Number(input.supirUpscale) || 1);
-  const lowVramFactor = input.supirPreset === "low_vram" ? 2.4 : 1;
-  const modelFactor = input.supirModel.toLowerCase().includes("v0f") ? 1.15 : 1;
-  const llavaFactor = input.supirUseLlava ? 1.3 : 1;
-  const deviceName = selectedDeviceName(input.devices, input.supirDevice, input.preferredModelDevice);
-  const gpuFactor = gpuSpeedFactor(deviceName);
-  const vramFactor = lowVramLikely(deviceName) ? 1.35 : 1;
-  const workUnits = imageWorkUnits(megapixels, upscale, lowVramFactor * modelFactor * llavaFactor * vramFactor);
-  const eta = (420_000 * megapixels * Math.pow(upscale, 0.6) * lowVramFactor * modelFactor * llavaFactor * gpuFactor * vramFactor) + 90_000;
-
-  return calibratedEstimate(imageCalibrationKey(input, deviceName), workUnits, {
-    milliseconds: roundToNearestSecond(eta),
-    label: "SUPIR",
-    detail: `${input.supirModel}, ${input.supirPreset.replace("_", " ")}, ${input.dimensions.width}x${input.dimensions.height}, ${deviceName || "selected GPU"}`,
-  });
+  return emptyEta("Image", "Choose an action to estimate runtime.");
 }
 
 export function estimateAudioEta(input: AudioEtaInput): EtaEstimate {
@@ -256,21 +248,6 @@ export function recordVideoEtaRuntime(input: VideoEtaInput, actualMilliseconds: 
         : videoWorkUnits(frames, megapixels, processorFactor * providerFactor);
 
   recordCalibrationSample(videoCalibrationKey(input, deviceName), workUnits, actualMilliseconds);
-}
-
-export function recordImageEtaRuntime(input: ImageEtaInput, actualMilliseconds: number) {
-  if (input.imageAction !== "supir" || !input.dimensions) return;
-
-  const megapixels = megapixelsFromDimensions(input.dimensions);
-  const upscale = Math.max(1, Number(input.supirUpscale) || 1);
-  const lowVramFactor = input.supirPreset === "low_vram" ? 2.4 : 1;
-  const modelFactor = input.supirModel.toLowerCase().includes("v0f") ? 1.15 : 1;
-  const llavaFactor = input.supirUseLlava ? 1.3 : 1;
-  const deviceName = selectedDeviceName(input.devices, input.supirDevice, input.preferredModelDevice);
-  const vramFactor = lowVramLikely(deviceName) ? 1.35 : 1;
-  const workUnits = imageWorkUnits(megapixels, upscale, lowVramFactor * modelFactor * llavaFactor * vramFactor);
-
-  recordCalibrationSample(imageCalibrationKey(input, deviceName), workUnits, actualMilliseconds);
 }
 
 function emptyEta(label: string, detail: string): EtaEstimate {
@@ -340,28 +317,12 @@ function videoCalibrationKey(input: VideoEtaInput, deviceName: string) {
   return calibrationKey(["video", input.action, input.faceFusionProvider, input.faceFusionProcessor, deviceName]);
 }
 
-function imageCalibrationKey(input: ImageEtaInput, deviceName: string) {
-  return calibrationKey([
-    "image",
-    input.imageAction,
-    deviceName,
-    input.supirModel,
-    input.supirPreset,
-    input.supirUpscale,
-    input.supirUseLlava ? "llava" : "no-llava",
-  ]);
-}
-
 function calibrationKey(parts: Array<string | number | boolean>) {
   return parts.map((part) => String(part).trim().toLowerCase().replace(/\s+/g, " ") || "default").join("|");
 }
 
 function videoWorkUnits(frames: number, megapixels: number, settingsFactor: number) {
   return Math.max(0.001, frames * megapixels * Math.max(0.1, settingsFactor));
-}
-
-function imageWorkUnits(megapixels: number, upscale: number, settingsFactor: number) {
-  return Math.max(0.001, megapixels * Math.pow(upscale, 0.6) * Math.max(0.1, settingsFactor));
 }
 
 function isAiVideoAction(action: string) {
@@ -446,9 +407,4 @@ function gpuSpeedFactor(name: string) {
   if (lower.includes("amd") || lower.includes("radeon")) return 1.8;
   if (lower.includes("intel")) return 2.5;
   return 1.6;
-}
-
-function lowVramLikely(name: string) {
-  const lower = name.toLowerCase();
-  return lower.includes("3050") || lower.includes("3060") || lower.includes("4060") || lower.includes("4070 laptop");
 }

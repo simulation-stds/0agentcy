@@ -105,13 +105,18 @@ export const cudnnDownloadUrl = "https://developer.nvidia.com/cudnn-downloads";
 export const cudaBinPath = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA";
 
 export const actions = [
+  { id: "video_effects", label: "Video effects" },
+  { id: "transcribe", label: "Transcribe / Subtitles (WhisperX)" },
   { id: "trim_mp4", label: "Trim / Export MP4" },
   { id: "extract_frame", label: "Extract Current Frame" },
+  { id: "contact_sheet", label: "Contact Sheet" },
   { id: "video_audio", label: "Video to Audio" },
   { id: "social_export", label: "Social Export" },
   { id: "realesrgan_upscale", label: "AI Upscale with Real-ESRGAN" },
   { id: "rife_interpolate", label: "Frame Interpolation with RIFE" },
   { id: "facefusion", label: "Face Swap / Enhance" },
+  { id: "wan21_generate", label: "Generate Video with Wan2.1" },
+  { id: "wan22_generate", label: "Generate Video with Wan2.2" },
 ];
 
 export const defaultAppSettings: AppSettings = {

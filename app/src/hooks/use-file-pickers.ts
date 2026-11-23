@@ -16,6 +16,7 @@ export function useFilePickers({
   appendLog,
 }: UseFilePickersArgs) {
   const [faceFusionSourcePath, setFaceFusionSourcePath] = useState("");
+  const [wan22ReferencePath, setWan22ReferencePath] = useState("");
 
   async function chooseFaceFusionSource() {
     const selected = await openDialog({
@@ -33,6 +34,34 @@ export function useFilePickers({
       setFaceFusionSourcePath(selected);
       appendLog(`FaceFusion source: ${selected}`);
     }
+  }
+
+  async function chooseWan22Reference() {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [
+        {
+          name: "Wan2.2 reference image",
+          extensions: ["png", "jpg", "jpeg", "webp", "bmp"],
+        },
+      ],
+    });
+
+    if (typeof selected === "string") {
+      setWan22ReferencePath(selected);
+      appendLog(`Wan2.2 reference image: ${selected}`);
+    }
+  }
+
+  function clearWan22Reference() {
+    setWan22ReferencePath("");
+    appendLog("Wan2.2 reference image cleared.");
+  }
+
+  function setWan22Reference(path: string) {
+    setWan22ReferencePath(path);
+    appendLog(`Wan2.2 reference image: ${path}`);
   }
 
   async function chooseDefaultDownloadFolder() {
@@ -73,7 +102,11 @@ export function useFilePickers({
 
   return {
     faceFusionSourcePath,
+    wan22ReferencePath,
     chooseFaceFusionSource,
+    chooseWan22Reference,
+    setWan22Reference,
+    clearWan22Reference,
     chooseDefaultDownloadFolder,
     chooseTempFolder,
     chooseRuntimeFolder,

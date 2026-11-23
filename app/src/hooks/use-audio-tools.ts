@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { buildWaveformPeaks } from "@/lib/audio-waveform";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { baseName, localAssetSrc } from "@/lib/media-utils";
+import { isAudioModel } from "@/hooks/use-audio-models";
 import { appendTailLog } from "@/lib/job-log";
+
+export type AudioModelOutput = { label: string; path: string };
 
 type JobResult = {
   outputPath: string;
@@ -22,6 +26,7 @@ type UseAudioToolsArgs = {
   resetJobProgress: () => void;
 };
 
+const videoExtensions = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "mts", "m2ts"];
 const audioExtensions = ["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "webm"];
 
 export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs) {
@@ -29,6 +34,8 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
   const [audioPath, setAudioPath] = useState("");
   const [audioName, setAudioName] = useState("");
   const [audioObjectUrl, setAudioObjectUrl] = useState("");
+  const [playbackUrl, setPlaybackUrl] = useState("");
+  const [waveformUrl, setWaveformUrl] = useState("");
   const [metadata, setMetadata] = useState<AudioMetadata | null>(null);
   const [peaks, setPeaks] = useState<number[][]>([]);
   const [waveformStatus, setWaveformStatus] = useState("Choose an audio file to preview.");
@@ -52,11 +59,16 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
   const [isLoading, setIsLoading] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [outputPath, setOutputPath] = useState("");
+  const [modelOutputs, setModelOutputs] = useState<AudioModelOutput[]>([]);
+  const runningModel = useRef(false);
 
-  const audioSrc = useMemo(() => {
-    if (audioObjectUrl) return audioObjectUrl;
-    return localAssetSrc(audioPath);
-  }, [audioObjectUrl, audioPath]);
+  const duration = metadata?.duration ?? 0;
+  const selectionDuration = trimEnd - trimStart;
+  const shouldPlaySelection = playSelectionOnly && duration > 0 &&
+    selectionDuration > 0.05 && selectionDuration < duration - 0.001;
+
+  const audioSrc = audioObjectUrl || playbackUrl;
+  const waveformSrc = audioObjectUrl || waveformUrl;
 
   useEffect(() => {
     return () => {
@@ -65,14 +77,14 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
   }, [audioObjectUrl]);
 
   useEffect(() => {
-    if (!audioSrc) {
+    if (!waveformSrc) {
       setPeaks([]);
       return;
     }
 
     let cancelled = false;
     setWaveformStatus("Building waveform...");
-    buildWaveformPeaks(audioSrc)
+    buildWaveformPeaks(waveformSrc)
       .then((nextPeaks) => {
         if (cancelled) return;
         setPeaks(nextPeaks);
@@ -91,18 +103,21 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
     return () => {
       cancelled = true;
     };
-  }, [appendLog, audioSrc]);
+  }, [appendLog, waveformSrc]);
 
-  const loadAudio = useCallback(async (path: string, displayName?: string) => {
+  const loadAudio = useCallback(async (path: string, displayName?: string, alreadyPcm = false) => {
     const trimmed = path.trim();
     if (!trimmed) return;
 
     resetJobProgress();
     setIsLoading(true);
     setOutputPath("");
+    setModelOutputs([]);
     setCurrentTime(0);
     setPeaks([]);
     setMetadata(null);
+    setPlaybackUrl("");
+    setWaveformUrl("");
     setAudioPath(trimmed);
     setAudioName(baseName(displayName || trimmed));
     setOutputName(baseName(displayName || trimmed));
@@ -118,7 +133,13 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
       appendLog(
         `Audio detected: ${info.codec || "unknown codec"}, ${info.sampleRate || 0} Hz, ${info.channels || 0} channels.`,
       );
-      audioRef.current?.load();
+      const previewPath = /Linux/i.test(navigator.userAgent) && !alreadyPcm
+        ? await invoke<string>("prepare_video_audio", { path: trimmed, preserveChannels: true })
+        : trimmed;
+      const url = await invoke<string | null>("audio_playback_url", { path: previewPath });
+      const asset = localAssetSrc(previewPath);
+      setWaveformUrl(asset);
+      setPlaybackUrl(url ?? asset);
     } catch (error) {
       appendLog(`Audio load failed: ${String(error).trim()}`);
     } finally {
@@ -147,30 +168,77 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
     }
   }
 
+  async function chooseInputVideo() {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Video", extensions: videoExtensions }],
+    });
+    if (typeof selected === "string") await loadVideoAudio(selected);
+  }
+
+  async function loadVideoAudio(path: string) {
+    setIsLoading(true);
+    appendLog("Audio: extracting the first audio track from video...");
+    try {
+      const preview = await invoke<string>("prepare_video_audio", { path, preserveChannels: true });
+      setAudioObjectUrl("");
+      await loadAudio(preview, baseName(path), true);
+    } catch (error) {
+      appendLog(`Audio load failed: ${String(error).trim()}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function loadDroppedMedia(paths: string[]) {
+    if (isLoading || isRunning) return;
+    const path = paths.find((file) => hasExtension(file, videoExtensions) || hasExtension(file, audioExtensions));
+    if (!path) {
+      appendLog("Drop a supported audio or video file.");
+      return;
+    }
+    if (hasExtension(path, videoExtensions)) {
+      await loadVideoAudio(path);
+    } else {
+      setAudioObjectUrl("");
+      await loadAudio(path);
+    }
+  }
+
   async function handleDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
+    if (isLoading || isRunning) return;
     const file = event.dataTransfer.files[0] as (File & { path?: string }) | undefined;
     if (!file) return;
 
-    if (!isAudioFile(file)) {
-      appendLog("Dropped file is not an audio file.");
+    if (file.type.startsWith("video/") || (!file.type.startsWith("audio/") && hasExtension(file.name, videoExtensions))) {
+      if (file.path) {
+        await loadVideoAudio(file.path);
+      } else {
+        appendLog("The dropped video has no local path. Open it with Browse Video.");
+      }
+      return;
+    }
+    if (!file.type.startsWith("audio/") && !hasExtension(file.name, audioExtensions)) {
+      appendLog("Drop a supported audio or video file.");
       return;
     }
 
     resetJobProgress();
-    const objectUrl = URL.createObjectURL(file);
-    setAudioObjectUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
-      return objectUrl;
-    });
-
     if (file.path) {
+      setAudioObjectUrl("");
       await loadAudio(file.path, file.name);
     } else {
+      setPlaybackUrl("");
+      setWaveformUrl("");
+      setAudioObjectUrl(URL.createObjectURL(file));
       setAudioPath("");
+      setModelOutputs([]);
       setAudioName(baseName(file.name));
       setOutputName(baseName(file.name));
       setMetadata(null);
+      setCurrentTime(0);
       setTrimStart(0);
       setTrimEnd(0);
       setVisibleStart(0);
@@ -198,32 +266,42 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
     setCurrentTime(safeTime);
   }
 
+  function playAudio(audio: HTMLAudioElement) {
+    void audio.play().catch((error) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      appendLog(`Audio playback failed: ${String(error)}`);
+    });
+  }
+
+  function handlePlaybackError() {
+    const message = audioRef.current?.error?.message;
+    appendLog(`Audio playback failed: ${message || "The audio source could not be played."}`);
+  }
+
+  function loadPlaybackMetadata(audio: HTMLAudioElement) {
+    if (audioPath || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    setMetadata({ duration: audio.duration, codec: "", sampleRate: 0, channels: 0, bitRate: 0 });
+    setTrimEnd(audio.duration);
+    setVisibleEnd(audio.duration);
+  }
+
   function togglePlayback() {
     const audio = audioRef.current;
     if (!audio || !metadata) return;
     if (audio.paused) {
-      if (playSelectionOnly && (audio.currentTime < trimStart || audio.currentTime >= trimEnd)) {
+      if (shouldPlaySelection && (audio.currentTime < trimStart || audio.currentTime >= trimEnd - 0.05)) {
         audio.currentTime = trimStart;
       }
-      void audio.play();
+      playAudio(audio);
     } else {
       audio.pause();
     }
   }
 
-  function toggleFitToSelection() {
-    setPlaySelectionOnly((current) => {
-      const nextValue = !current;
-      if (nextValue && trimEnd > trimStart) {
-        setVisibleStart(trimStart);
-        setVisibleEnd(trimEnd);
-        seekTo(trimStart);
-      } else {
-        setVisibleStart(0);
-        setVisibleEnd(metadata?.duration ?? 0);
-      }
-      return nextValue;
-    });
+  function setPreviewRange(start: number, end: number) {
+    setVisibleStart(start);
+    setVisibleEnd(end);
+    seekTo(start);
   }
 
   function toggleMute() {
@@ -235,28 +313,26 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
   }
 
   function handleTimeUpdate(value: number) {
-    setCurrentTime(value);
-    if (playSelectionOnly && trimEnd > trimStart && value >= trimEnd) {
-      const audio = audioRef.current;
-      if (audio) {
-        audio.currentTime = trimStart;
-        if (loopPlayback) {
-          void audio.play();
-        } else {
-          audio.pause();
-        }
-      }
-      setCurrentTime(trimStart);
+    const audio = audioRef.current;
+    if (!audio || audio.paused || !shouldPlaySelection || value < trimEnd) {
+      setCurrentTime(value);
+      return;
+    }
+    if (loopPlayback) {
+      seekTo(trimStart);
+    } else {
+      audio.pause();
+      seekTo(trimEnd);
     }
   }
 
   function handleEnded() {
-    if (!loopPlayback || playSelectionOnly) {
+    if (!loopPlayback) {
       setIsPlaying(false);
       return;
     }
-    seekTo(0);
-    void audioRef.current?.play();
+    seekTo(shouldPlaySelection ? trimStart : 0);
+    if (audioRef.current) playAudio(audioRef.current);
   }
 
   async function runAudioJob() {
@@ -267,35 +343,94 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
 
     setIsRunning(true);
     setOutputPath("");
+    setModelOutputs([]);
     resetJobProgress();
     appendLog("Running audio action...");
+    const options = {
+      inputPath: audioPath,
+      outputName,
+      action: action === "convert" && saveSelection ? "trim_convert" : action,
+      outputFormat,
+      trimStart,
+      trimEnd,
+      bitrate,
+      sampleRate,
+      channels,
+    };
     try {
-      const result = await invoke<JobResult>("run_audio_job", {
-        options: {
-          inputPath: audioPath,
-          outputName,
-          action: action === "convert" && saveSelection ? "trim_convert" : action,
-          outputFormat,
-          trimStart,
-          trimEnd,
-          bitrate,
-          sampleRate,
-          channels,
-        },
-      });
+      if (isAudioModel(action)) {
+        runningModel.current = true;
+        const { outputs, projectPath } = await invoke<{
+          outputs: AudioModelOutput[]; projectPath: string;
+        }>("run_audio_model", {
+          model: action,
+          options,
+          selection: saveSelection,
+        });
+        audioRef.current?.pause();
+        setIsPlaying(false);
+        setModelOutputs(outputs);
+        setOutputPath(outputs.find(({ label }) => label !== "Original")?.path ?? "");
+        for (const output of outputs) appendLog(`Audio complete: ${output.path}`);
+        appendLog(`Audio project saved: ${projectPath}`);
+        return;
+      }
+      const result = await invoke<JobResult>("run_audio_job", { options });
       appendTailLog(appendLog, result.log);
       setOutputPath(result.outputPath);
       appendLog(`Audio complete: ${result.outputPath}`);
     } catch (error) {
       appendLog(`Audio failed: ${String(error).trim()}`);
     } finally {
+      runningModel.current = false;
       setIsRunning(false);
     }
   }
 
+  async function openAudioProject() {
+    try {
+      const path = await openDialog({
+        multiple: false,
+        filters: [{ name: "Audio project", extensions: ["json"] }],
+      });
+      if (typeof path !== "string") return;
+      setIsLoading(true);
+      const project = await invoke<{ name: string; outputs: AudioModelOutput[] }>("open_audio_project", { path });
+      audioRef.current?.pause();
+      setIsPlaying(false);
+      setAudioObjectUrl("");
+      setPlaybackUrl("");
+      setWaveformUrl("");
+      setAudioPath("");
+      setMetadata(null);
+      setCurrentTime(0);
+      setTrimStart(0);
+      setTrimEnd(0);
+      setVisibleStart(0);
+      setVisibleEnd(0);
+      setAudioName(project.name);
+      setOutputName(project.name);
+      setOutputPath(project.outputs.find(({ label }) => label !== "Original")?.path ?? "");
+      setModelOutputs(project.outputs);
+      resetJobProgress();
+      appendLog(`Opened audio project: ${path}`);
+    } catch (error) {
+      appendLog(`Could not open audio project: ${String(error).trim()}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function prepareVoiceCleanup(path: string) {
+    setAudioObjectUrl("");
+    setAction("deepfilter");
+    setSaveSelection(false);
+    await loadAudio(path);
+  }
+
   async function cancelAudioJob() {
     try {
-      await invoke("cancel_audio_job");
+      await invoke(runningModel.current ? "cancel_audio_model" : "cancel_audio_job");
       appendLog("Audio cancel requested.");
     } catch (error) {
       appendLog(`Audio cancel failed: ${String(error).trim()}`);
@@ -318,6 +453,7 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
     action,
     saveSelection,
     playSelectionOnly,
+    shouldPlaySelection,
     loopPlayback,
     showSeparateChannels,
     isPlaying,
@@ -330,15 +466,20 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
     isLoading,
     isRunning,
     outputPath,
+    modelOutputs,
     chooseInputAudio,
+    chooseInputVideo,
+    loadDroppedMedia,
     handleDrop,
     setCurrentTime,
     seekTo,
     updateTrimStart,
     updateTrimEnd,
     togglePlayback,
+    handlePlaybackError,
+    loadPlaybackMetadata,
     toggleMute,
-    toggleFitToSelection,
+    setPreviewRange,
     handleTimeUpdate,
     handleEnded,
     setAction,
@@ -353,48 +494,12 @@ export function useAudioTools({ appendLog, resetJobProgress }: UseAudioToolsArgs
     setChannels,
     setOutputName,
     runAudioJob,
+    prepareVoiceCleanup,
+    openAudioProject,
     cancelAudioJob,
   };
 }
 
-async function buildWaveformPeaks(src: string) {
-  const response = await fetch(src);
-  const buffer = await response.arrayBuffer();
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  const context = new AudioContextClass();
-  try {
-    const audioBuffer = await context.decodeAudioData(buffer.slice(0));
-    const channelCount = Math.min(audioBuffer.numberOfChannels, 6);
-    const bucketCount = 900;
-    const channelPeaks: number[][] = [];
-    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
-      const channel = audioBuffer.getChannelData(channelIndex);
-      const bucketSize = Math.max(1, Math.floor(channel.length / bucketCount));
-      const peaks: number[] = [];
-      for (let bucket = 0; bucket < bucketCount; bucket += 1) {
-        const start = bucket * bucketSize;
-        const end = Math.min(channel.length, start + bucketSize);
-        let peak = 0;
-        for (let index = start; index < end; index += 1) {
-          peak = Math.max(peak, Math.abs(channel[index]));
-        }
-        peaks.push(peak);
-      }
-      const max = Math.max(...peaks, 0.001);
-      channelPeaks.push(peaks.map((peak) => peak / max));
-    }
-    return channelPeaks;
-  } finally {
-    await context.close();
-  }
-}
-
-function isAudioFile(file: File) {
-  return file.type.startsWith("audio/") || new RegExp(`\\.(${audioExtensions.join("|")})$`, "i").test(file.name);
-}
-
-declare global {
-  interface Window {
-    webkitAudioContext?: typeof AudioContext;
-  }
+function hasExtension(path: string, extensions: string[]) {
+  return extensions.includes(path.split(".").pop()?.toLowerCase() ?? "");
 }

@@ -8,6 +8,7 @@ import type { AnimatedImageFrame } from "@/hooks/use-image-render-effects";
 import type { CompressorSizeSummary } from "@/hooks/use-image-tools";
 import { localAssetSrc } from "@/lib/media-utils";
 import type { ColorFormat } from "@/lib/palette";
+import { ZoomIn, ZoomOut } from "lucide-react";
 
 type ImagePreviewProps = {
   imageAction: string;
@@ -22,7 +23,12 @@ type ImagePreviewProps = {
   compressorSizeSummary: CompressorSizeSummary | null;
   ditherViewport: DitherViewport;
   onSetDitherViewport: Dispatch<SetStateAction<DitherViewport>>;
-  supirOutputPath: string;
+  vosrOutputPath: string;
+  vosrBlendSource: string;
+  vosrDetailPath: string;
+  vosrStrength: number;
+  skinStrength: number;
+  flux2OutputPath: string;
   paletteResult: PaletteResult | null;
   paletteColorFormat: ColorFormat;
   ditherCanvasRef: RefObject<HTMLCanvasElement | null>;
@@ -44,7 +50,12 @@ export function ImagePreview({
   compressorSizeSummary,
   ditherViewport,
   onSetDitherViewport,
-  supirOutputPath,
+  vosrOutputPath,
+  vosrBlendSource,
+  vosrDetailPath,
+  vosrStrength,
+  skinStrength,
+  flux2OutputPath,
   paletteResult,
   paletteColorFormat,
   ditherCanvasRef,
@@ -52,7 +63,10 @@ export function ImagePreview({
   paletteCanvasRef,
   paletteSourceCanvasRef,
 }: ImagePreviewProps) {
-  const supirSrc = localAssetSrc(supirOutputPath);
+  const detailSrc = localAssetSrc(vosrDetailPath);
+  const restoreSrc = localAssetSrc(vosrOutputPath);
+  const restoreBeforeSrc = detailSrc ? restoreSrc : vosrBlendSource;
+  const flux2Src = localAssetSrc(flux2OutputPath);
   const compressorSrc = localAssetSrc(compressorOutputPath);
   const [ditherDataUrl, setDitherDataUrl] = useState("");
   const [ditherOriginalDataUrl, setDitherOriginalDataUrl] = useState("");
@@ -252,8 +266,7 @@ export function ImagePreview({
                 afterSrc={currentDitherGifFrame.dataUrl}
                 beforeLabel="Original"
                 afterLabel="Dither"
-                className="dither-inline-compare"
-              />
+                className="dither-inline-compare" />
             )}
             {ditherComparePreview && !isAnimatedDither && isDitherReady && ditherOriginalDataUrl && ditherDataUrl && (
               <ImageComparePreview
@@ -261,8 +274,7 @@ export function ImagePreview({
                 afterSrc={ditherDataUrl}
                 beforeLabel="Original"
                 afterLabel="Dither"
-                className="dither-inline-compare"
-              />
+                className="dither-inline-compare" />
             )}
             {!ditherComparePreview && isAnimatedDither && currentDitherGifFrame && (
               <img className="dither-gif-preview" src={currentDitherGifFrame.dataUrl} alt="Dithered GIF preview" />
@@ -275,18 +287,17 @@ export function ImagePreview({
               onPointerDown={startDitherPan}
               onPointerMove={updateDitherPan}
               onPointerUp={stopDitherPan}
-              onPointerCancel={stopDitherPan}
-            />
+              onPointerCancel={stopDitherPan} />
             {isOriginalSizeDither && !ditherComparePreview && isDitherReady && (
               <div className="dither-floating-controls">
                 <SecondaryButton type="button" title="Zoom out" onClick={() => updateDitherZoom(ditherViewport.zoom - 0.25)}>
-                  <span className="material-symbols-rounded" aria-hidden="true">zoom_out</span>
+                  <ZoomOut className="app-icon" />
                 </SecondaryButton>
                 <SecondaryButton type="button" title="Reset zoom" onClick={resetDitherViewport}>
                   {Math.round(ditherViewport.zoom * 100)}%
                 </SecondaryButton>
                 <SecondaryButton type="button" title="Zoom in" onClick={() => updateDitherZoom(ditherViewport.zoom + 0.25)}>
-                  <span className="material-symbols-rounded" aria-hidden="true">zoom_in</span>
+                  <ZoomIn className="app-icon" />
                 </SecondaryButton>
               </div>
             )}
@@ -334,8 +345,7 @@ export function ImagePreview({
               afterSrc={compressorSrc}
               beforeLabel="Original"
               afterLabel="Compressed"
-              className="dither-inline-compare"
-            />
+              className="dither-inline-compare" />
           ) : (
             <img className="ai-preview-image" src={compressorSrc || compressorInputSrc} alt={compressorSrc ? "Compressed image preview" : "Source image preview"} />
           )}
@@ -349,26 +359,37 @@ export function ImagePreview({
         </div>
       )}
 
-      {imageAction === "supir" && (
+      {imageAction === "vosr" && (
         <>
           <div className="dither-preview-shell">
-            {imageSrc && supirSrc ? (
+            {restoreBeforeSrc && restoreSrc ? (
               <div className="supir-preview-wrap">
                 <ImageComparePreview
-                  beforeSrc={imageSrc}
-                  afterSrc={supirSrc}
-                  beforeLabel="Original"
-                  afterLabel="SUPIR"
-                  className="supir-inline-compare"
-                />
+                  beforeSrc={restoreBeforeSrc}
+                  afterSrc={detailSrc || restoreSrc}
+                  beforeLabel={detailSrc ? "VOSR 2.0" : "Original"}
+                  afterLabel={detailSrc ? `${skinStrength}% skin detail` : `${vosrStrength}% VOSR`}
+                  afterOpacity={(detailSrc ? skinStrength : vosrStrength) / 100}
+                  crossfade={Boolean(detailSrc)}
+                  className="supir-inline-compare" />
               </div>
-            ) : imageSrc ? (
-              <img className="ai-preview-image" src={imageSrc} alt="" />
+            ) : restoreSrc || imageSrc ? (
+              <img className="ai-preview-image" src={restoreSrc || imageSrc} alt={restoreSrc ? "VOSR result" : ""} />
             ) : (
-              <div className="empty-state"><strong>Ready for an image</strong><p>Choose an image to restore with SUPIR.</p></div>
+              <div className="empty-state"><strong>Ready for an image</strong><p>Choose an image to restore with VOSR 2.0.</p></div>
             )}
           </div>
         </>
+      )}
+
+      {imageAction === "flux2" && (
+        <div className="dither-preview-shell">
+          {flux2Src ? (
+            <img className="ai-preview-image" src={flux2Src} alt="Flux.2 generated image" />
+          ) : (
+            <div className="empty-state"><strong>Ready for a prompt</strong><p>Describe an image below and generate it locally.</p></div>
+          )}
+        </div>
       )}
     </section>
   );

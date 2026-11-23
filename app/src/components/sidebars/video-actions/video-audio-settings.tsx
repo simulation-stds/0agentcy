@@ -14,8 +14,7 @@ export function VideoAudioSettings({ audioFormat, onSetAudioFormat }: VideoAudio
         options={[
           { value: "mp3", label: "MP3" },
           { value: "wav", label: "WAV" },
-        ]}
-      />
+        ]} />
     </FormRow>
   );
 }

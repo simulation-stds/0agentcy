@@ -59,6 +59,7 @@ export function RealEsrganSettings({
 }: RealEsrganSettingsProps) {
   return (
     <div className="settings-grid">
+      {!models.length && <p role="status">Install the runtime and a model in Settings → Video → Real-ESRGAN to enable upscaling.</p>}
       <SecondaryButton type="button" disabled={!canCompareModels} onClick={onCompareModels}>
         {isComparingModels ? "Show Running Compare" : "Generate Comparison"}
       </SecondaryButton>

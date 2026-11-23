@@ -1,10 +1,12 @@
+import type { ReactNode } from "react";
 import { PrimaryButton, SecondaryButton, StatusBadge, ToolAccordionItem } from "@/components/app-controls";
 import type { SelectOption } from "@/components/app-controls";
-import { FaceFusionToolSection, RealEsrganToolSection, RifeToolSection, SupirToolSection } from "@/components/settings/video-tool-sections";
+import { FaceFusionToolSection, Flux2ToolSection, RealEsrganToolSection, RifeToolSection, Wan21ToolSection, Wan22ToolSection } from "@/components/settings/video-tool-sections";
 import { Accordion } from "@/components/ui/accordion";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { FaceFusionStatus, SupirModel, SupirStatus, ToolStatus, ToolStorage } from "@/hooks/use-tool-state";
+import type { FaceFusionStatus, Flux2Status, ToolStatus, ToolStorage, Wan21Status, Wan22Status } from "@/hooks/use-tool-state";
 import { imageCodecToolCatalog, type ImageCodecTool, type ModelSettingsRow, type ModelTool } from "@/lib/app-options";
+import { Brush, Download, Folder, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 
 type RuntimeProviderOption = SelectOption & {
   provider: string;
@@ -25,10 +27,16 @@ type VideoSettingsProps = {
   isUpdatingEsrgan: boolean;
   isUpdatingRife: boolean;
   isUpdatingFaceFusion: boolean;
+  isUpdatingWan21: boolean;
+  isUpdatingWan22: boolean;
   hasRealEsrganUpdate: boolean;
   hasRifeUpdate: boolean;
   hasFaceFusionUpdate: boolean;
+  hasWan21Update: boolean;
+  hasWan22Update: boolean;
   faceFusionStatus: FaceFusionStatus | null;
+  wan21Status: Wan21Status | null;
+  wan22Status: Wan22Status | null;
   availableFaceFusionProviders: RuntimeProviderOption[];
   faceFusionRuntime: string;
   storageFor: (key: string) => ToolStorage | undefined;
@@ -40,6 +48,10 @@ type VideoSettingsProps = {
   onUpdateRife: (models: string[]) => void;
   onOpenModelInstall: (tool: ModelTool) => void;
   onUpdateFaceFusion: () => void;
+  onUpdateWan21: () => void;
+  onDeleteWan21: () => void;
+  onUpdateWan22: () => void;
+  onDeleteWan22: () => void;
   onSetFaceFusionRuntime: (runtime: string) => void;
 };
 
@@ -58,10 +70,16 @@ export function VideoSettings({
   isUpdatingEsrgan,
   isUpdatingRife,
   isUpdatingFaceFusion,
+  isUpdatingWan21,
+  isUpdatingWan22,
   hasRealEsrganUpdate,
   hasRifeUpdate,
   hasFaceFusionUpdate,
+  hasWan21Update,
+  hasWan22Update,
   faceFusionStatus,
+  wan21Status,
+  wan22Status,
   availableFaceFusionProviders,
   faceFusionRuntime,
   storageFor,
@@ -73,6 +91,10 @@ export function VideoSettings({
   onUpdateRife,
   onOpenModelInstall,
   onUpdateFaceFusion,
+  onUpdateWan21,
+  onDeleteWan21,
+  onUpdateWan22,
+  onDeleteWan22,
   onSetFaceFusionRuntime,
 }: VideoSettingsProps) {
   return (
@@ -81,11 +103,11 @@ export function VideoSettings({
       <Tabs value={tab} onValueChange={(value) => onSelectTab(value as "editing" | "generative")} className="settings-inner-tabs-wrap">
         <TabsList variant="line" className="settings-inner-tabs" aria-label="Video model sections">
           <TabsTrigger value="editing">
-            <span className="material-symbols-rounded" aria-hidden="true">edit</span>
+            <Brush className="app-icon" />
             Editing
           </TabsTrigger>
           <TabsTrigger value="generative">
-            <span className="material-symbols-rounded" aria-hidden="true">auto_awesome</span>
+            <Sparkles className="app-icon" />
             Generative
           </TabsTrigger>
         </TabsList>
@@ -104,8 +126,7 @@ export function VideoSettings({
               onDeleteModel={onDeleteModel}
               onDeleteAllModels={onDeleteAllModels}
               onUpdateModels={onUpdateRealEsrgan}
-              onOpenModelInstall={onOpenModelInstall}
-            />
+              onOpenModelInstall={onOpenModelInstall} />
             <RifeToolSection
               tools={tools}
               rows={rifeModelRows}
@@ -118,8 +139,7 @@ export function VideoSettings({
               onDeleteModel={onDeleteModel}
               onDeleteAllModels={onDeleteAllModels}
               onUpdateModels={onUpdateRife}
-              onOpenModelInstall={onOpenModelInstall}
-            />
+              onOpenModelInstall={onOpenModelInstall} />
           </Accordion>
         </TabsContent>
 
@@ -133,8 +153,21 @@ export function VideoSettings({
               hasUpdate={hasFaceFusionUpdate}
               storageFor={storageFor}
               onUpdateFaceFusion={onUpdateFaceFusion}
-              onSetFaceFusionRuntime={onSetFaceFusionRuntime}
-            />
+              onSetFaceFusionRuntime={onSetFaceFusionRuntime} />
+            <Wan21ToolSection
+              wan21Status={wan21Status}
+              isUpdatingWan21={isUpdatingWan21}
+              hasWan21Update={hasWan21Update}
+              storageFor={storageFor}
+              onUpdateWan21={onUpdateWan21}
+              onDeleteWan21={onDeleteWan21} />
+            <Wan22ToolSection
+              wan22Status={wan22Status}
+              isUpdatingWan22={isUpdatingWan22}
+              hasWan22Update={hasWan22Update}
+              storageFor={storageFor}
+              onUpdateWan22={onUpdateWan22}
+              onDeleteWan22={onDeleteWan22} />
           </Accordion>
         </TabsContent>
       </Tabs>
@@ -143,10 +176,12 @@ export function VideoSettings({
 }
 
 export function ModelPlaceholderSettings({
+  editing,
   title,
   tab,
   onSelectTab,
 }: {
+  editing: import("react").ReactNode;
   title: string;
   tab: "editing" | "generative";
   onSelectTab: (tab: "editing" | "generative") => void;
@@ -157,21 +192,17 @@ export function ModelPlaceholderSettings({
       <Tabs value={tab} onValueChange={(value) => onSelectTab(value as "editing" | "generative")} className="settings-inner-tabs-wrap">
         <TabsList variant="line" className="settings-inner-tabs" aria-label={`${title} model sections`}>
           <TabsTrigger value="editing">
-            <span className="material-symbols-rounded" aria-hidden="true">edit</span>
+            <Brush className="app-icon" />
             Editing
           </TabsTrigger>
           <TabsTrigger value="generative">
-            <span className="material-symbols-rounded" aria-hidden="true">auto_awesome</span>
+            <Sparkles className="app-icon" />
             Generative
           </TabsTrigger>
         </TabsList>
 
         <TabsContent value="editing" className="settings-tab-content">
-          <div className="service-card info">
-            <span>{title}</span>
-            <strong>Planned</strong>
-            <code>Placeholder for editing tools.</code>
-          </div>
+          {editing}
         </TabsContent>
 
         <TabsContent value="generative" className="settings-tab-content">
@@ -187,55 +218,37 @@ export function ModelPlaceholderSettings({
 }
 
 export function ImageModelSettings({
+  vosrSettings,
   tools,
   tab,
   expandedTool,
-  supirStatus,
-  supirModels,
-  isUpdatingSupir,
-  isUpdatingSupirXformers,
-  hasSupirUpdate,
-  hasSupirXformersUpdate,
+  flux2Status,
+  isUpdatingFlux2,
+  hasFlux2Update,
   updatingImageCodecTool,
   imageCodecUpdates,
-  activeSupirCheckpoint,
   storageFor,
   onSelectTab,
   onSetExpandedTool,
-  onUpdateSupir,
-  onUpdateSupirXformers,
+  onUpdateFlux2,
   onUpdateImageCodecTool,
   onDeleteImageCodecTool,
-  onDeleteSupirXformers,
-  onImportSupirCheckpoint,
-  onImportSupirCheckpointFromDownloads,
-  onDownloadSupirCheckpoint,
-  onDeleteSupirCheckpoint,
 }: {
+  vosrSettings: ReactNode;
   tools: ToolStatus | null;
   tab: "editing" | "generative";
   expandedTool: string;
-  supirStatus: SupirStatus | null;
-  supirModels: SupirModel[];
-  isUpdatingSupir: boolean;
-  isUpdatingSupirXformers: boolean;
-  hasSupirUpdate: boolean;
-  hasSupirXformersUpdate: boolean;
+  flux2Status: Flux2Status | null;
+  isUpdatingFlux2: boolean;
+  hasFlux2Update: boolean;
   updatingImageCodecTool: ImageCodecTool | "";
   imageCodecUpdates: Record<ImageCodecTool, boolean>;
-  activeSupirCheckpoint: string;
   storageFor: (key: string) => ToolStorage | undefined;
   onSelectTab: (tab: "editing" | "generative") => void;
   onSetExpandedTool: (value: string) => void;
-  onUpdateSupir: () => void;
-  onUpdateSupirXformers: () => void;
+  onUpdateFlux2: () => void;
   onUpdateImageCodecTool: (tool: ImageCodecTool) => void;
   onDeleteImageCodecTool: (tool: ImageCodecTool) => void;
-  onDeleteSupirXformers: () => void;
-  onImportSupirCheckpoint: (sourcePath: string, checkpointName: string) => void;
-  onImportSupirCheckpointFromDownloads: (checkpointName: string) => void;
-  onDownloadSupirCheckpoint: (checkpointName: string) => void;
-  onDeleteSupirCheckpoint: (checkpointName: string) => void;
 }) {
   return (
     <>
@@ -243,16 +256,17 @@ export function ImageModelSettings({
       <Tabs value={tab} onValueChange={(value) => onSelectTab(value as "editing" | "generative")} className="settings-inner-tabs-wrap">
         <TabsList variant="line" className="settings-inner-tabs" aria-label="Image model sections">
           <TabsTrigger value="editing">
-            <span className="material-symbols-rounded" aria-hidden="true">edit</span>
+            <Brush className="app-icon" />
             Editing
           </TabsTrigger>
           <TabsTrigger value="generative">
-            <span className="material-symbols-rounded" aria-hidden="true">auto_awesome</span>
+            <Sparkles className="app-icon" />
             Generative
           </TabsTrigger>
         </TabsList>
 
         <TabsContent value="editing" className="settings-tab-content">
+          {vosrSettings}
           <Accordion type="single" collapsible value={expandedTool} onValueChange={(value) => onSetExpandedTool(value || "")} className="settings-accordion">
             {imageCodecToolCatalog.map((tool) => (
               <ImageCodecToolSection
@@ -263,31 +277,19 @@ export function ImageModelSettings({
                 isUpdating={updatingImageCodecTool === tool.key}
                 hasUpdate={imageCodecUpdates[tool.key]}
                 onUpdate={() => onUpdateImageCodecTool(tool.key)}
-                onDelete={() => onDeleteImageCodecTool(tool.key)}
-              />
+                onDelete={() => onDeleteImageCodecTool(tool.key)} />
             ))}
           </Accordion>
         </TabsContent>
 
         <TabsContent value="generative" className="settings-tab-content">
           <Accordion type="single" collapsible value={expandedTool} onValueChange={(value) => onSetExpandedTool(value || "")} className="settings-accordion">
-            <SupirToolSection
-              supirStatus={supirStatus}
-              supirModels={supirModels}
-              isUpdatingSupir={isUpdatingSupir}
-              isUpdatingSupirXformers={isUpdatingSupirXformers}
-              hasSupirUpdate={hasSupirUpdate}
-              hasSupirXformersUpdate={hasSupirXformersUpdate}
-              activeSupirCheckpoint={activeSupirCheckpoint}
+            <Flux2ToolSection
+              flux2Status={flux2Status}
+              isUpdatingFlux2={isUpdatingFlux2}
+              hasFlux2Update={hasFlux2Update}
               storageFor={storageFor}
-              onUpdateSupir={onUpdateSupir}
-              onUpdateSupirXformers={onUpdateSupirXformers}
-              onDeleteSupirXformers={onDeleteSupirXformers}
-              onImportSupirCheckpoint={onImportSupirCheckpoint}
-              onImportSupirCheckpointFromDownloads={onImportSupirCheckpointFromDownloads}
-              onDownloadSupirCheckpoint={onDownloadSupirCheckpoint}
-              onDeleteSupirCheckpoint={onDeleteSupirCheckpoint}
-            />
+              onUpdateFlux2={onUpdateFlux2} />
           </Accordion>
         </TabsContent>
       </Tabs>
@@ -329,25 +331,25 @@ function ImageCodecToolSection({
       <p>Source: {tool.sourceLabel}. The app will use {tool.executableLabel} for image conversion and optimization workflows.</p>
       <div className="tool-dropdown-info">
         <code title={installedPath || `D:/W2DS/Tools/videomaxxxing/tools/${tool.key}`}>
-          <span className="material-symbols-rounded" aria-hidden="true">folder</span>
+          <Folder className="app-icon" />
           {installedPath || `D:/W2DS/Tools/videomaxxxing/tools/${tool.key}`}
         </code>
       </div>
       <div className="tool-dropdown-actions">
         {installed && hasUpdate && (
           <SecondaryButton disabled={isUpdating} onClick={onUpdate}>
-            <span className="material-symbols-rounded" aria-hidden="true">sync</span>
+            <RefreshCw className="app-icon" />
             Update
           </SecondaryButton>
         )}
         {installed ? (
           <SecondaryButton disabled={isUpdating} onClick={onDelete}>
-            <span className="material-symbols-rounded" aria-hidden="true">delete</span>
+            <Trash2 className="app-icon" />
             Uninstall
           </SecondaryButton>
         ) : (
           <PrimaryButton disabled={isUpdating} onClick={onUpdate}>
-            <span className="material-symbols-rounded" aria-hidden="true">download</span>
+            <Download className="app-icon" />
             Download
           </PrimaryButton>
         )}

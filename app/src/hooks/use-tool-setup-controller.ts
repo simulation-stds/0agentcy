@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { useModelInstall } from "@/hooks/use-model-install";
 import { useToolManagement } from "@/hooks/use-tool-management";
 import type { useToolState } from "@/hooks/use-tool-state";
@@ -16,9 +15,6 @@ export function useToolSetupController({
 }: UseToolSetupControllerArgs) {
   const { models, rifeModels } = toolState;
 
-  useEffect(() => {
-    toolState.refreshToolState();
-  }, []);
 
   const toolManagement = useToolManagement({
     faceFusionRuntime,

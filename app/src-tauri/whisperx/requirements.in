@@ -1,0 +1,11 @@
+# Update and verify all four platform/device locks together.
+whisperx==3.8.6
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+ctranslate2==4.6.0
+faster-whisper==1.2.1
+pyannote-audio==4.0.2
+# Audio is decoded by FFmpeg; use the CPU codec wheel even with CUDA inference.
+torchcodec===0.7.0
+transformers==4.57.1

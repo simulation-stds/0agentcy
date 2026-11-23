@@ -1,10 +1,10 @@
-import { FieldLabel, IconButton, PathButton, PrimaryButton, SecondaryButton, StatusBadge, ToolAccordionItem, type SelectOption } from "@/components/app-controls";
+import { RealEsrganRuntimeSettings } from "@/components/settings/realesrgan-runtime-settings";
+import { FieldLabel, PrimaryButton, SecondaryButton, StatusBadge, ToolAccordionItem, type SelectOption } from "@/components/app-controls";
 import { ModelRows } from "@/components/settings/model-rows";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import type { FaceFusionStatus, SupirModel, SupirStatus, ToolStatus, ToolStorage } from "@/hooks/use-tool-state";
+import type { FaceFusionStatus, Flux2Status, ToolStatus, ToolStorage, Wan21Status, Wan22Status } from "@/hooks/use-tool-state";
 import type { ModelSettingsRow, ModelTool } from "@/lib/app-options";
+import { Box, Download, Folder, Gauge, RefreshCw, Trash2 } from "lucide-react";
 
 type RuntimeProviderOption = SelectOption & {
   provider: string;
@@ -43,21 +43,21 @@ export function RealEsrganToolSection({
 
   return (
     <ToolAccordionItem value="realesrgan" title="Real-ESRGAN" summary={summary} hasModels>
-      <p>Real-ESRGAN upscales and restores video frames with local NCNN Vulkan models. Installed models can be removed independently.</p>
+      <RealEsrganRuntimeSettings installing={isUpdating} onRepair={() => onUpdateModels([])} />
+      <p>Install or remove models below. Adding a model keeps your other installed models.</p>
       <ModelRows tool="realesrgan" rows={rows} basicModel={basicModel} onDeleteModel={onDeleteModel} onDownloadModel={onUpdateModels} />
       <div className="tool-dropdown-info">
-        <code title={tools?.realesrgan || "D:/W2DS/Tools/videomaxxxing/tools/realesrgan-ncnn-vulkan"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{tools?.realesrgan || "D:/W2DS/Tools/videomaxxxing/tools/realesrgan-ncnn-vulkan"}</code>
-        <code><span className="material-symbols-rounded" aria-hidden="true">storage</span>{tools?.realesrgan ? `Tool folder: ${storageFor("realesrgan")?.currentLabel || "0 B"}` : `Estimated: ${storageFor("realesrgan")?.estimatedInstallLabel || "~120-350 MB"}`}</code>
+        <code><Gauge className="app-icon" />{tools?.realesrgan ? `Tool folder: ${storageFor("realesrgan")?.currentLabel || "0 B"}` : `Estimated: ${storageFor("realesrgan")?.estimatedInstallLabel || "~120-350 MB"}`}</code>
       </div>
       <div className="tool-dropdown-actions">
         {hasModels && hasUpdate && (
-          <SecondaryButton disabled={isUpdating} onClick={() => onOpenModelInstall("realesrgan")}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update All</SecondaryButton>
+          <SecondaryButton disabled={isUpdating} onClick={() => onOpenModelInstall("realesrgan")}><RefreshCw className="app-icon" />Update All</SecondaryButton>
         )}
         {hasModels && (
-          <SecondaryButton disabled={isUpdating} onClick={() => onDeleteAllModels("realesrgan")}><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall All</SecondaryButton>
+          <SecondaryButton disabled={isUpdating} onClick={() => onDeleteAllModels("realesrgan")}><Trash2 className="app-icon" />Remove all models</SecondaryButton>
         )}
         {missingModelNames.length > 0 && (
-          <PrimaryButton disabled={isUpdating} onClick={() => onUpdateModels(missingModelNames)}><span className="material-symbols-rounded" aria-hidden="true">download</span>{hasModels ? "Download Missing" : "Download"}</PrimaryButton>
+          <PrimaryButton disabled={isUpdating} onClick={() => onUpdateModels(missingModelNames)}><Download className="app-icon" />{hasModels ? "Download Missing" : "Download"}</PrimaryButton>
         )}
       </div>
     </ToolAccordionItem>
@@ -85,18 +85,18 @@ export function RifeToolSection({
       <p>RIFE creates intermediate frames for smoother motion and higher frame-rate output. Installed interpolation models can be removed independently.</p>
       <ModelRows tool="rife" rows={rows} basicModel={basicModel} onDeleteModel={onDeleteModel} onDownloadModel={onUpdateModels} />
       <div className="tool-dropdown-info">
-        <code title={tools?.rife || "D:/W2DS/Tools/videomaxxxing/tools/rife-ncnn-vulkan"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{tools?.rife || "D:/W2DS/Tools/videomaxxxing/tools/rife-ncnn-vulkan"}</code>
-        <code><span className="material-symbols-rounded" aria-hidden="true">storage</span>{tools?.rife ? `Tool folder: ${storageFor("rife")?.currentLabel || "0 B"}` : `Estimated: ${storageFor("rife")?.estimatedInstallLabel || "~180-800 MB"}`}</code>
+        <code title={tools?.rife || "D:/W2DS/Tools/videomaxxxing/tools/rife-ncnn-vulkan"}><Folder className="app-icon" />{tools?.rife || "D:/W2DS/Tools/videomaxxxing/tools/rife-ncnn-vulkan"}</code>
+        <code><Gauge className="app-icon" />{tools?.rife ? `Tool folder: ${storageFor("rife")?.currentLabel || "0 B"}` : `Estimated: ${storageFor("rife")?.estimatedInstallLabel || "~180-800 MB"}`}</code>
       </div>
       <div className="tool-dropdown-actions">
         {hasModels && hasUpdate && (
-          <SecondaryButton disabled={isUpdating} onClick={() => onOpenModelInstall("rife")}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update All</SecondaryButton>
+          <SecondaryButton disabled={isUpdating} onClick={() => onOpenModelInstall("rife")}><RefreshCw className="app-icon" />Update All</SecondaryButton>
         )}
         {hasModels && (
-          <SecondaryButton disabled={isUpdating} onClick={() => onDeleteAllModels("rife")}><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall All</SecondaryButton>
+          <SecondaryButton disabled={isUpdating} onClick={() => onDeleteAllModels("rife")}><Trash2 className="app-icon" />Uninstall All</SecondaryButton>
         )}
         {missingModelNames.length > 0 && (
-          <PrimaryButton disabled={isUpdating} onClick={() => onUpdateModels(missingModelNames)}><span className="material-symbols-rounded" aria-hidden="true">download</span>{hasModels ? "Download Missing" : "Download"}</PrimaryButton>
+          <PrimaryButton disabled={isUpdating} onClick={() => onUpdateModels(missingModelNames)}><Download className="app-icon" />{hasModels ? "Download Missing" : "Download"}</PrimaryButton>
         )}
       </div>
     </ToolAccordionItem>
@@ -173,363 +173,258 @@ export function FaceFusionToolSection({
         </label>
       </div>
       <div className="tool-dropdown-info">
-        <code title={faceFusionStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/facefusion/repo"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{faceFusionStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/facefusion/repo"}</code>
+        <code title={faceFusionStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/facefusion/repo"}><Folder className="app-icon" />{faceFusionStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/facefusion/repo"}</code>
       </div>
       <div className="tool-dropdown-actions">
         {faceFusionInstalled && hasUpdate && (
-          <SecondaryButton disabled={isUpdatingFaceFusion} onClick={onUpdateFaceFusion}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update</SecondaryButton>
+          <SecondaryButton disabled={isUpdatingFaceFusion} onClick={onUpdateFaceFusion}><RefreshCw className="app-icon" />Update</SecondaryButton>
         )}
         {faceFusionInstalled ? (
-          <SecondaryButton disabled><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall</SecondaryButton>
+          <SecondaryButton disabled><Trash2 className="app-icon" />Uninstall</SecondaryButton>
         ) : (
-          <PrimaryButton disabled={isUpdatingFaceFusion} onClick={onUpdateFaceFusion}><span className="material-symbols-rounded" aria-hidden="true">download</span>{setupLabel}</PrimaryButton>
+          <PrimaryButton disabled={isUpdatingFaceFusion} onClick={onUpdateFaceFusion}><Download className="app-icon" />{setupLabel}</PrimaryButton>
         )}
       </div>
     </ToolAccordionItem>
   );
 }
 
-export function SupirToolSection({
-  supirStatus,
-  supirModels,
-  isUpdatingSupir,
-  isUpdatingSupirXformers,
-  hasSupirUpdate,
-  hasSupirXformersUpdate,
-  activeSupirCheckpoint,
+export function Flux2ToolSection({
+  flux2Status,
+  isUpdatingFlux2,
+  hasFlux2Update,
   storageFor,
-  onUpdateSupir,
-  onUpdateSupirXformers,
-  onDeleteSupirXformers,
-  onImportSupirCheckpoint,
-  onImportSupirCheckpointFromDownloads,
-  onDownloadSupirCheckpoint,
-  onDeleteSupirCheckpoint,
+  onUpdateFlux2,
 }: {
-  supirStatus: SupirStatus | null;
-  supirModels: SupirModel[];
-  isUpdatingSupir: boolean;
-  isUpdatingSupirXformers: boolean;
-  hasSupirUpdate: boolean;
-  hasSupirXformersUpdate: boolean;
-  activeSupirCheckpoint: string;
+  flux2Status: Flux2Status | null;
+  isUpdatingFlux2: boolean;
+  hasFlux2Update: boolean;
   storageFor: (key: string) => ToolStorage | undefined;
-  onUpdateSupir: () => void;
-  onUpdateSupirXformers: () => void;
-  onDeleteSupirXformers: () => void;
-  onImportSupirCheckpoint: (sourcePath: string, checkpointName: string) => void;
-  onImportSupirCheckpointFromDownloads: (checkpointName: string) => void;
-  onDownloadSupirCheckpoint: (checkpointName: string) => void;
-  onDeleteSupirCheckpoint: (checkpointName: string) => void;
+  onUpdateFlux2: () => void;
 }) {
-  const state = supirStatus?.state || "missing";
-  const summary = state === "installed"
-    ? `Tool folder: ${storageFor("supir")?.currentLabel || supirStatus?.currentSizeLabel || "0 B"}`
-    : `Estimated: ${storageFor("supir")?.estimatedInstallLabel || supirStatus?.estimatedInstallLabel || "~20-80 GB"}`;
-  const supirInstalled = state === "installed";
+  const state = flux2Status?.state || "missing";
+  const installed = state === "installed";
   const setupLabel = state === "needs_setup" ? "Set Up" : "Download";
-  const requiredModels = supirModels.filter((model) => model.required);
-  const optionalModels = supirModels.filter((model) => !model.required);
-  const checkpointPath = supirStatus?.checkpointPath || "D:/W2DS/Tools/videomaxxxing/tools/supir/checkpoints";
-  const xformersReady = Boolean(supirStatus?.xformersReady);
-  const xformersVersion = supirStatus?.xformersVersion ? ` ${supirStatus.xformersVersion}` : "";
-  const xformersMessage = supirStatus?.xformersMessage || "";
-  const xformersShortMessage = xformersMessage.length > 180 ? `${xformersMessage.slice(0, 180)}...` : xformersMessage;
-
-  async function chooseCheckpoint(model: SupirModel) {
-    const selected = await openDialog({
-      multiple: false,
-      directory: false,
-      filters: [
-        {
-          name: model.fileName,
-          extensions: model.fileName.endsWith(".safetensors") ? ["safetensors"] : ["ckpt"],
-        },
-      ],
-    });
-
-    if (typeof selected === "string") {
-      onImportSupirCheckpoint(selected, model.name);
-    }
-  }
-
-  async function openDownloadPage(model: SupirModel) {
-    await openUrl(model.downloadUrl);
-  }
+  const summary = installed
+    ? `Tool folder: ${storageFor("flux2")?.currentLabel || flux2Status?.currentSizeLabel || "0 B"}`
+    : `Estimated: ${storageFor("flux2")?.estimatedInstallLabel || flux2Status?.estimatedInstallLabel || "~12-30 GB"}`;
+  const runtimeVersions = [
+    flux2Status?.torchVersion ? `torch ${flux2Status.torchVersion}` : "",
+    flux2Status?.diffusersVersion ? `diffusers ${flux2Status.diffusersVersion}` : "",
+    flux2Status?.transformersVersion ? `transformers ${flux2Status.transformersVersion}` : "",
+    flux2Status?.accelerateVersion ? `accelerate ${flux2Status.accelerateVersion}` : "",
+  ].filter(Boolean);
 
   return (
     <ToolAccordionItem
-      value="supir"
-      title="SUPIR"
+      value="flux2"
+      title="Flux.2"
       badge={(
-        <StatusBadge tone={state === "installed" ? "installed" : state === "needs_setup" ? "update" : "missing"}>
-          {state === "installed" ? "Installed" : state === "needs_setup" ? "Needs setup" : "Missing"}
+        <StatusBadge tone={installed ? "installed" : state === "needs_setup" ? "update" : "missing"}>
+          {installed ? "Installed" : state === "needs_setup" ? "Needs setup" : "Missing"}
         </StatusBadge>
       )}
       summary={summary}
     >
-      <p>SUPIR (Fanghua-Yu/SUPIR) is a CUDA-only generative image restoration and upscaling model. The installer vendors the GitHub repo and Python environment, but checkpoints must be placed manually because upstream hosts them outside GitHub releases.</p>
-      <p className="settings-note">Use only where the SUPIR license and non-commercial upstream model terms fit your workflow.</p>
-      <p className="settings-note">{supirStatus?.message || "Status unavailable."}</p>
+      <p>Flux.2 Klein is a local text-to-image generation runtime using PyTorch, Diffusers, Transformers, and Accelerate in its own Conda environment.</p>
+      <p className="settings-note">The model weights download on first run. Expect a large cache and about 13 GB VRAM for normal CUDA use.</p>
+      <p className="settings-note">{flux2Status?.message || "Status unavailable."}</p>
       <div className="tool-component-row">
         <div>
           <span className="model-title-row">
-            <strong>xFormers acceleration</strong>
-            <span className={`status-chip ${xformersReady ? "installed" : "missing"}`}>
-              {xformersReady ? "Ready" : "Needs setup"}
+            <strong>Python runtime</strong>
+            <span className={`status-chip ${flux2Status?.runtimeReady ? "installed" : "missing"}`}>
+              {flux2Status?.runtimeReady ? "Ready" : "Needs setup"}
             </span>
-            {xformersVersion && <span className="status-chip local">{xformersVersion.trim()}</span>}
+            <span className={`status-chip ${flux2Status?.cudaReady ? "installed" : "missing"}`}>
+              {flux2Status?.cudaReady ? "CUDA" : "No CUDA"}
+            </span>
           </span>
-          <span title={xformersMessage || "xFormers is installed into the SUPIR Conda environment."}>
-            xFormers provides memory-efficient CUDA attention for SUPIR, reducing VRAM use and enabling the upstream attention layers.
-            {xformersShortMessage && ` ${xformersShortMessage}`}
-          </span>
-        </div>
-        <div className="supir-checkpoint-actions">
-          {xformersReady ? (
-            <>
-              {hasSupirXformersUpdate && (
-                <IconButton type="button" disabled={isUpdatingSupir || isUpdatingSupirXformers} title="Update xFormers" onClick={onUpdateSupirXformers}>
-                  <span className="material-symbols-rounded" aria-hidden="true">sync</span>
-                </IconButton>
-              )}
-              <IconButton type="button" className="danger" disabled={isUpdatingSupir || isUpdatingSupirXformers} title="Remove xFormers" onClick={onDeleteSupirXformers}>
-                <span className="material-symbols-rounded" aria-hidden="true">delete</span>
-              </IconButton>
-            </>
-          ) : (
-            <IconButton type="button" disabled={isUpdatingSupir || isUpdatingSupirXformers} title="Install xFormers" onClick={onUpdateSupirXformers}>
-              <span className="material-symbols-rounded" aria-hidden="true">{isUpdatingSupirXformers ? "sync" : "download"}</span>
-            </IconButton>
-          )}
+          <span>{runtimeVersions.length ? runtimeVersions.join(" | ") : "PyTorch, Diffusers, Transformers, and Accelerate will be installed into the Flux.2 environment."}</span>
         </div>
       </div>
-      <SupirCheckpointRows
-        title="Required checkpoints"
-        models={requiredModels}
-        checkpointPath={checkpointPath}
-        activeCheckpoint={activeSupirCheckpoint}
-        onChooseCheckpoint={chooseCheckpoint}
-        onImportFromDownloads={onImportSupirCheckpointFromDownloads}
-        onDownloadCheckpoint={onDownloadSupirCheckpoint}
-        onOpenDownloadPage={openDownloadPage}
-        onDeleteCheckpoint={onDeleteSupirCheckpoint}
-      />
-      <SupirCheckpointRows
-        title="Optional checkpoints"
-        models={optionalModels}
-        checkpointPath={checkpointPath}
-        activeCheckpoint={activeSupirCheckpoint}
-        onChooseCheckpoint={chooseCheckpoint}
-        onImportFromDownloads={onImportSupirCheckpointFromDownloads}
-        onDownloadCheckpoint={onDownloadSupirCheckpoint}
-        onOpenDownloadPage={openDownloadPage}
-        onDeleteCheckpoint={onDeleteSupirCheckpoint}
-      />
-      <SupirAdvancedDependencies onOpenDownloadPage={openUrl} />
       <div className="tool-dropdown-info">
-        <code title={supirStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/supir/repo"}><span className="material-symbols-rounded" aria-hidden="true">folder</span>{supirStatus?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/supir/repo"}</code>
-        <code title={supirStatus?.checkpointPath || "D:/W2DS/Tools/videomaxxxing/tools/supir/checkpoints"}><span className="material-symbols-rounded" aria-hidden="true">deployed_code</span>{supirStatus?.checkpointPath || "D:/W2DS/Tools/videomaxxxing/tools/supir/checkpoints"}</code>
+        <code title={flux2Status?.toolPath || "D:/W2DS/Tools/videomaxxxing/tools/flux2"}><Folder className="app-icon" />{flux2Status?.toolPath || "D:/W2DS/Tools/videomaxxxing/tools/flux2"}</code>
+        <code title={flux2Status?.cachePath || "D:/W2DS/Tools/videomaxxxing/tools/flux2/cache"}><Box className="app-icon" />{flux2Status?.cachePath || "D:/W2DS/Tools/videomaxxxing/tools/flux2/cache"}</code>
       </div>
       <div className="tool-dropdown-actions">
-        {supirInstalled && hasSupirUpdate && (
-          <SecondaryButton disabled={isUpdatingSupir} onClick={onUpdateSupir}><span className="material-symbols-rounded" aria-hidden="true">sync</span>Update</SecondaryButton>
+        {installed && hasFlux2Update && (
+          <SecondaryButton disabled={isUpdatingFlux2} onClick={onUpdateFlux2}><RefreshCw className="app-icon" />Update</SecondaryButton>
         )}
-        {supirInstalled ? (
-          <SecondaryButton disabled><span className="material-symbols-rounded" aria-hidden="true">delete</span>Uninstall</SecondaryButton>
+        {installed ? (
+          <SecondaryButton disabled><Trash2 className="app-icon" />Uninstall</SecondaryButton>
         ) : (
-          <PrimaryButton disabled={isUpdatingSupir} onClick={onUpdateSupir}><span className="material-symbols-rounded" aria-hidden="true">download</span>{setupLabel}</PrimaryButton>
+          <PrimaryButton disabled={isUpdatingFlux2} onClick={onUpdateFlux2}><Download className="app-icon" />{setupLabel}</PrimaryButton>
         )}
       </div>
     </ToolAccordionItem>
   );
 }
 
-function SupirCheckpointRows({
-  title,
-  models,
-  checkpointPath,
-  activeCheckpoint,
-  onChooseCheckpoint,
-  onImportFromDownloads,
-  onDownloadCheckpoint,
-  onOpenDownloadPage,
-  onDeleteCheckpoint,
+export function Wan22ToolSection({
+  wan22Status,
+  isUpdatingWan22,
+  hasWan22Update,
+  storageFor,
+  onUpdateWan22,
+  onDeleteWan22,
 }: {
-  title: string;
-  models: SupirModel[];
-  checkpointPath: string;
-  activeCheckpoint: string;
-  onChooseCheckpoint: (model: SupirModel) => void;
-  onImportFromDownloads: (checkpointName: string) => void;
-  onDownloadCheckpoint: (checkpointName: string) => void;
-  onOpenDownloadPage: (model: SupirModel) => void;
-  onDeleteCheckpoint: (checkpointName: string) => void;
+  wan22Status: Wan22Status | null;
+  isUpdatingWan22: boolean;
+  hasWan22Update: boolean;
+  storageFor: (key: string) => ToolStorage | undefined;
+  onUpdateWan22: () => void;
+  onDeleteWan22: () => void;
 }) {
-  if (!models.length) return null;
+  const state = wan22Status?.state || "missing";
+  const installed = state === "installed";
+  const setupLabel = state === "needs_setup" ? "Set Up" : "Download";
+  const summary = installed
+    ? `Tool folder: ${storageFor("wan22")?.currentLabel || wan22Status?.currentSizeLabel || "0 B"}`
+    : `Estimated: ${storageFor("wan22")?.estimatedInstallLabel || wan22Status?.estimatedInstallLabel || "~25-60 GB"}`;
+  const runtimeVersions = [
+    wan22Status?.torchVersion ? `torch ${wan22Status.torchVersion}` : "",
+    wan22Status?.diffusersVersion ? `diffusers ${wan22Status.diffusersVersion}` : "",
+    wan22Status?.transformersVersion ? `transformers ${wan22Status.transformersVersion}` : "",
+    wan22Status?.accelerateVersion ? `accelerate ${wan22Status.accelerateVersion}` : "",
+  ].filter(Boolean);
 
   return (
-    <div className="model-list supir-checkpoint-list">
-      <h3>{title}</h3>
-      {models.map((model) => (
-        <SupirCheckpointRow
-          key={model.name}
-          model={model}
-          checkpointPath={checkpointPath}
-          activeCheckpoint={activeCheckpoint}
-          onChooseCheckpoint={onChooseCheckpoint}
-          onImportFromDownloads={onImportFromDownloads}
-          onDownloadCheckpoint={onDownloadCheckpoint}
-          onOpenDownloadPage={onOpenDownloadPage}
-          onDeleteCheckpoint={onDeleteCheckpoint}
-        />
-      ))}
-    </div>
-  );
-}
-
-function SupirCheckpointRow({
-  model,
-  checkpointPath,
-  activeCheckpoint,
-  onChooseCheckpoint,
-  onImportFromDownloads,
-  onDownloadCheckpoint,
-  onOpenDownloadPage,
-  onDeleteCheckpoint,
-}: {
-  model: SupirModel;
-  checkpointPath: string;
-  activeCheckpoint: string;
-  onChooseCheckpoint: (model: SupirModel) => void;
-  onImportFromDownloads: (checkpointName: string) => void;
-  onDownloadCheckpoint: (checkpointName: string) => void;
-  onOpenDownloadPage: (model: SupirModel) => void;
-  onDeleteCheckpoint: (checkpointName: string) => void;
-}) {
-  const isActive = activeCheckpoint === model.name;
-  const installedPath = model.installedPath || `${checkpointPath}\\${model.fileName}`;
-  const primaryLabel = model.installed
-    ? installedPath
-    : model.directDownload
-      ? `Download ${model.label}`
-      : `Find ${model.fileName} in Downloads`;
-  const primaryIcon = model.installed ? "folder" : model.directDownload ? "download" : "download_done";
-  const primaryTitle = model.installed
-    ? installedPath
-    : model.directDownload
-      ? `Download ${model.fileName}`
-      : `Import ${model.fileName} from Downloads`;
-  const onPrimaryAction = () => {
-    if (model.installed) {
-      onChooseCheckpoint(model);
-      return;
-    }
-    if (model.directDownload) {
-      onDownloadCheckpoint(model.name);
-      return;
-    }
-    onImportFromDownloads(model.name);
-  };
-
-  return (
-    <div className="tool-component-row supir-checkpoint-row">
-      <div>
-        <span className="model-title-row">
-          <strong>{model.label}</strong>
-          <span className={`status-chip ${model.installed ? "installed" : "missing"}`}>{model.installed ? "Installed" : "Missing"}</span>
-          {model.name === "SUPIR-v0Q" && <span className="status-chip suggested">Suggested</span>}
-          <span className="status-chip local">{model.sourceLabel}</span>
-        </span>
-        <span>{model.description}</span>
-        <PathButton type="button" className="supir-checkpoint-path-button" title={primaryTitle} disabled={isActive} onClick={onPrimaryAction}>
-          <span className="material-symbols-rounded" aria-hidden="true">{isActive ? "sync" : primaryIcon}</span>
-          <span>{isActive ? "Downloading..." : primaryLabel}</span>
-        </PathButton>
-        {!model.installed && !model.directDownload && (
-          <SecondaryButton type="button" className="supir-choose-file-button" onClick={() => onChooseCheckpoint(model)}>
-            <span className="material-symbols-rounded" aria-hidden="true">upload_file</span>
-            Choose file manually
-          </SecondaryButton>
-        )}
-      </div>
-      <code>{model.installed ? `Installed: ${model.sizeLabel}` : `Estimated: ${model.estimatedSizeLabel}`}</code>
-      <div className="supir-checkpoint-actions">
-        <SecondaryButton type="button" title={`Open ${model.sourceLabel} page`} onClick={() => onOpenDownloadPage(model)}>
-          <span className="material-symbols-rounded" aria-hidden="true">open_in_new</span>
-        </SecondaryButton>
-        {model.installed && (
-          <SecondaryButton
-            type="button"
-            className="danger"
-            title={`Remove ${model.label}`}
-            onClick={() => onDeleteCheckpoint(model.name)}
-          >
-            <span className="material-symbols-rounded" aria-hidden="true">delete</span>
-          </SecondaryButton>
-        )}
-      </div>
-    </div>
-  );
-}
-
-const supirAdvancedDependencies = [
-  {
-    name: "OpenAI CLIP",
-    sourceLabel: "Hugging Face",
-    estimate: "Downloaded by Python when needed",
-    description: "Shared image/text encoder used by SUPIR dependencies.",
-    url: "https://huggingface.co/openai/clip-vit-large-patch14",
-  },
-  {
-    name: "OpenAI CLIP 336",
-    sourceLabel: "Hugging Face",
-    estimate: "Downloaded only if LLaVA needs it",
-    description: "Higher-resolution CLIP encoder used by LLaVA guidance.",
-    url: "https://huggingface.co/openai/clip-vit-large-patch14-336",
-  },
-  {
-    name: "LAION bigG CLIP",
-    sourceLabel: "Hugging Face",
-    estimate: "Large",
-    description: "Advanced encoder dependency used by the upstream SUPIR stack.",
-    url: "https://huggingface.co/laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
-  },
-  {
-    name: "LLaVA 1.5 13B",
-    sourceLabel: "Hugging Face",
-    estimate: "~26 GB",
-    description: "Optional prompt guidance model. Leave LLaVA off to avoid this large download.",
-    url: "https://huggingface.co/liuhaotian/llava-v1.5-13b",
-  },
-];
-
-function SupirAdvancedDependencies({
-  onOpenDownloadPage,
-}: {
-  onOpenDownloadPage: (url: string) => void;
-}) {
-  return (
-    <div className="model-list supir-checkpoint-list">
-      <h3>Advanced downloads</h3>
-      <p className="settings-note">These are optional runtime downloads. They are only relevant if LLaVA guidance is enabled or if the Python libraries need to populate their Hugging Face cache.</p>
-      {supirAdvancedDependencies.map((item) => (
-        <div className="tool-component-row supir-checkpoint-row" key={item.name}>
-          <div>
-            <span className="model-title-row">
-              <strong>{item.name}</strong>
-              <span className="status-chip local">{item.sourceLabel}</span>
+    <ToolAccordionItem
+      value="wan22"
+      title="Wan2.2"
+      badge={(
+        <StatusBadge tone={installed ? "installed" : state === "needs_setup" ? "update" : "missing"}>
+          {installed ? "Installed" : state === "needs_setup" ? "Needs setup" : "Missing"}
+        </StatusBadge>
+      )}
+      summary={summary}
+    >
+      <p>Wan2.2 TI2V-5B generates short local videos from a prompt, with an optional image reference for image-to-video. This v1 installer only targets the 5B TI2V model.</p>
+      <p className="settings-note">Use an NVIDIA CUDA GPU for practical generation. Low-VRAM settings are enabled by default in the Video workspace.</p>
+      <p className="settings-note">{wan22Status?.message || "Status unavailable."}</p>
+      <div className="tool-component-row">
+        <div>
+          <span className="model-title-row">
+            <strong>Python runtime</strong>
+            <span className={`status-chip ${wan22Status?.runtimeReady ? "installed" : "missing"}`}>
+              {wan22Status?.runtimeReady ? "Ready" : "Needs setup"}
             </span>
-            <span>{item.description}</span>
-          </div>
-          <code>{item.estimate}</code>
-          <div className="supir-checkpoint-actions">
-            <SecondaryButton type="button" title={`Open ${item.sourceLabel} page`} onClick={() => onOpenDownloadPage(item.url)}>
-              <span className="material-symbols-rounded" aria-hidden="true">open_in_new</span>
-            </SecondaryButton>
-          </div>
+            <span className={`status-chip ${wan22Status?.modelReady ? "installed" : "missing"}`}>
+              {wan22Status?.modelReady ? "Model" : "No model"}
+            </span>
+            <span className={`status-chip ${wan22Status?.cudaReady ? "installed" : "missing"}`}>
+              {wan22Status?.cudaReady ? "CUDA" : "No CUDA"}
+            </span>
+            <span className={`status-chip ${wan22Status?.flashAttnReady ? "installed" : "update"}`}>
+              {wan22Status?.flashAttnReady ? "Flash attention" : "No flash attention"}
+            </span>
+          </span>
+          <span>{runtimeVersions.length ? runtimeVersions.join(" | ") : "PyTorch, Diffusers, Transformers, Accelerate, and Wan runtime packages will be installed into the Wan2.2 environment."}</span>
         </div>
-      ))}
-    </div>
+      </div>
+      {wan22Status?.flashAttnMessage && !wan22Status.flashAttnReady && (
+        <p className="settings-note">Flash attention warning: {wan22Status.flashAttnMessage}</p>
+      )}
+      <div className="tool-dropdown-info">
+        <code title={wan22Status?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/wan22/repo"}><Folder className="app-icon" />{wan22Status?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/wan22/repo"}</code>
+        <code title={wan22Status?.modelPath || "D:/W2DS/Tools/videomaxxxing/tools/wan22/models/Wan2.2-TI2V-5B"}><Box className="app-icon" />{wan22Status?.modelPath || "D:/W2DS/Tools/videomaxxxing/tools/wan22/models/Wan2.2-TI2V-5B"}</code>
+        <code title={wan22Status?.cachePath || "D:/W2DS/Tools/videomaxxxing/tools/wan22/cache"}><Box className="app-icon" />{wan22Status?.cachePath || "D:/W2DS/Tools/videomaxxxing/tools/wan22/cache"}</code>
+      </div>
+      <div className="tool-dropdown-actions">
+        {installed ? (
+          <>
+            <SecondaryButton disabled={isUpdatingWan22} onClick={onUpdateWan22}><RefreshCw className="app-icon" />{hasWan22Update ? "Update" : "Repair / Update"}</SecondaryButton>
+            <SecondaryButton disabled={isUpdatingWan22} onClick={onDeleteWan22}><Trash2 className="app-icon" />Uninstall</SecondaryButton>
+          </>
+        ) : (
+          <PrimaryButton disabled={isUpdatingWan22} onClick={onUpdateWan22}><Download className="app-icon" />{setupLabel}</PrimaryButton>
+        )}
+      </div>
+    </ToolAccordionItem>
+  );
+}
+
+export function Wan21ToolSection({
+  wan21Status,
+  isUpdatingWan21,
+  hasWan21Update,
+  storageFor,
+  onUpdateWan21,
+  onDeleteWan21,
+}: {
+  wan21Status: Wan21Status | null;
+  isUpdatingWan21: boolean;
+  hasWan21Update: boolean;
+  storageFor: (key: string) => ToolStorage | undefined;
+  onUpdateWan21: () => void;
+  onDeleteWan21: () => void;
+}) {
+  const state = wan21Status?.state || "missing";
+  const installed = state === "installed";
+  const setupLabel = state === "needs_setup" ? "Set Up" : "Download";
+  const summary = installed
+    ? `Tool folder: ${storageFor("wan21")?.currentLabel || wan21Status?.currentSizeLabel || "0 B"}`
+    : `Estimated: ${storageFor("wan21")?.estimatedInstallLabel || wan21Status?.estimatedInstallLabel || "~10-25 GB"}`;
+  const runtimeVersions = [
+    wan21Status?.torchVersion ? `torch ${wan21Status.torchVersion}` : "",
+    wan21Status?.diffusersVersion ? `diffusers ${wan21Status.diffusersVersion}` : "",
+    wan21Status?.transformersVersion ? `transformers ${wan21Status.transformersVersion}` : "",
+    wan21Status?.accelerateVersion ? `accelerate ${wan21Status.accelerateVersion}` : "",
+  ].filter(Boolean);
+
+  return (
+    <ToolAccordionItem
+      value="wan21"
+      title="Wan2.1"
+      badge={(
+        <StatusBadge tone={installed ? "installed" : state === "needs_setup" ? "update" : "missing"}>
+          {installed ? "Installed" : state === "needs_setup" ? "Needs setup" : "Missing"}
+        </StatusBadge>
+      )}
+      summary={summary}
+    >
+      <p>Wan2.1 T2V-1.3B generates prompt-only local videos at 480p. It is kept separate from Wan2.2 because it uses its own runtime, model, and lower-memory generation path.</p>
+      <p className="settings-note">Use an NVIDIA CUDA GPU for practical generation. Conservative offload settings are enabled by default in the Video workspace.</p>
+      <p className="settings-note">{wan21Status?.message || "Status unavailable."}</p>
+      <div className="tool-component-row">
+        <div>
+          <span className="model-title-row">
+            <strong>Python runtime</strong>
+            <span className={`status-chip ${wan21Status?.runtimeReady ? "installed" : "missing"}`}>
+              {wan21Status?.runtimeReady ? "Ready" : "Needs setup"}
+            </span>
+            <span className={`status-chip ${wan21Status?.modelReady ? "installed" : "missing"}`}>
+              {wan21Status?.modelReady ? "Model" : "No model"}
+            </span>
+            <span className={`status-chip ${wan21Status?.cudaReady ? "installed" : "missing"}`}>
+              {wan21Status?.cudaReady ? "CUDA" : "No CUDA"}
+            </span>
+            <span className={`status-chip ${wan21Status?.flashAttnReady ? "installed" : "update"}`}>
+              {wan21Status?.flashAttnReady ? "Flash attention" : "No flash attention"}
+            </span>
+          </span>
+          <span>{runtimeVersions.length ? runtimeVersions.join(" | ") : "PyTorch, Diffusers, Transformers, Accelerate, and Wan runtime packages will be installed into the Wan2.1 environment."}</span>
+        </div>
+      </div>
+      {wan21Status?.flashAttnMessage && !wan21Status.flashAttnReady && (
+        <p className="settings-note">Flash attention warning: {wan21Status.flashAttnMessage}</p>
+      )}
+      <div className="tool-dropdown-info">
+        <code title={wan21Status?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/wan21/repo"}><Folder className="app-icon" />{wan21Status?.repoPath || "D:/W2DS/Tools/videomaxxxing/tools/wan21/repo"}</code>
+        <code title={wan21Status?.modelPath || "D:/W2DS/Tools/videomaxxxing/tools/wan21/models/Wan2.1-T2V-1.3B"}><Box className="app-icon" />{wan21Status?.modelPath || "D:/W2DS/Tools/videomaxxxing/tools/wan21/models/Wan2.1-T2V-1.3B"}</code>
+        <code title={wan21Status?.cachePath || "D:/W2DS/Tools/videomaxxxing/tools/wan21/cache"}><Box className="app-icon" />{wan21Status?.cachePath || "D:/W2DS/Tools/videomaxxxing/tools/wan21/cache"}</code>
+      </div>
+      <div className="tool-dropdown-actions">
+        {installed ? (
+          <>
+            <SecondaryButton disabled={isUpdatingWan21} onClick={onUpdateWan21}><RefreshCw className="app-icon" />{hasWan21Update ? "Update" : "Repair / Update"}</SecondaryButton>
+            <SecondaryButton disabled={isUpdatingWan21} onClick={onDeleteWan21}><Trash2 className="app-icon" />Uninstall</SecondaryButton>
+          </>
+        ) : (
+          <PrimaryButton disabled={isUpdatingWan21} onClick={onUpdateWan21}><Download className="app-icon" />{setupLabel}</PrimaryButton>
+        )}
+      </div>
+    </ToolAccordionItem>
   );
 }

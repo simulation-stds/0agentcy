@@ -1,10 +1,11 @@
-import { useState, type DragEvent, type MutableRefObject, type RefObject } from "react";
+import { useEffect, useState, type DragEvent, type MutableRefObject, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { defaultPath } from "@/lib/app-options";
-import { formatTime } from "@/lib/media-utils";
+import { formatTime, localAssetSrc } from "@/lib/media-utils";
 
 export type VideoMetadata = {
+  rotation?: number;
   duration: number;
   fps: number;
   width: number;
@@ -40,18 +41,36 @@ export function useVideoMedia({
   setTrimEnd,
 }: UseVideoMediaArgs) {
   const [inputPath, setInputPath] = useState(defaultPath);
+  const [previewSrc, setPreviewSrc] = useState("");
   const [metadata, setMetadata] = useState<VideoMetadata | null>(null);
   const [thumbnails, setThumbnails] = useState<Thumbnail[]>([]);
   const [previewStart, setPreviewStart] = useState(0);
   const [previewEnd, setPreviewEnd] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
+  const [waveformSource, setWaveformSource] = useState<{ path: string; duration: number } | null>(null);
+  const [waveformUrl, setWaveformUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setWaveformUrl(null);
+    if (waveformSource) {
+      invoke<string | null>("generate_video_waveform", waveformSource)
+        .then((url) => { if (!cancelled) setWaveformUrl(url); })
+        .catch((error) => { if (!cancelled) appendLog(`Waveform unavailable: ${String(error)}`); });
+    }
+    return () => { cancelled = true; };
+  }, [waveformSource, appendLog]);
 
   async function loadVideo(pathOverride?: string) {
     const path = (pathOverride ?? inputPath).trim();
     if (!path) return;
 
     setInputPath(path);
+    setPreviewSrc("");
+    setWaveformSource(null);
+    setWaveformUrl(null);
+    setMetadata(null);
     setIsLoading(true);
     setThumbnails([]);
     setCurrentTime(0);
@@ -64,11 +83,19 @@ export function useVideoMedia({
     try {
       const info = await invoke<VideoMetadata>("probe_video", { path });
       setMetadata(info);
+      setWaveformSource({ path, duration: info.duration });
       setTrimStart(0);
       setTrimEnd(info.duration);
       setPreviewStart(0);
       setPreviewEnd(info.duration);
       appendLog(`Detected ${info.width}x${info.height}, ${info.codec}, ${info.fps.toFixed(3)} fps.`);
+
+      try {
+        const url = await invoke<string | null>("video_preview_url", { path });
+        setPreviewSrc(url ?? localAssetSrc(path));
+      } catch (error) {
+        appendLog(`Preview unavailable: ${String(error)}`);
+      }
 
       const thumbs = await invoke<Thumbnail[]>("generate_thumbnails", {
         path,
@@ -79,7 +106,6 @@ export function useVideoMedia({
       });
       setThumbnails(thumbs);
       appendLog(thumbs.length ? `Generated ${thumbs.length} thumbnails.` : "No thumbnails were generated for this file.");
-      videoRef.current?.load();
     } catch (error) {
       appendLog(`Load failed: ${String(error)}`);
     } finally {
@@ -147,16 +173,28 @@ export function useVideoMedia({
     if (!file) return;
 
     if (file.path) {
-      await loadVideo(file.path);
+      await loadDroppedVideo([file.path]);
     } else {
       appendLog("Dropped file path was not available. Use Browse Video instead.");
     }
   }
 
+  async function loadDroppedVideo(paths: string[]) {
+    if (isLoading) return;
+    const path = paths.find((candidate) => /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(candidate));
+    if (!path) {
+      appendLog("Dropped file is not a supported video file.");
+      return;
+    }
+    await loadVideo(path);
+  }
+
   return {
     inputPath,
+    previewSrc,
     metadata,
     thumbnails,
+    waveformUrl,
     previewStart,
     previewEnd,
     currentTime,
@@ -170,5 +208,6 @@ export function useVideoMedia({
     loadPreviewRange,
     chooseInputVideo,
     handleDrop,
+    loadDroppedVideo,
   };
 }

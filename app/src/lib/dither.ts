@@ -1,3 +1,4 @@
+import blueNoiseTile from "./blue-noise.json";
 import type { DitherSettings } from "@/lib/app-options";
 
 export type DitherViewport = {
@@ -100,7 +101,7 @@ function noiseThreshold(x: number, y: number, settings: DitherSettings, blueNois
   if (!blueNoise) {
     return stableNoise(nx, ny, seed);
   }
-  return clamp((stableNoise(nx * 5, ny * 5, seed) + stableNoise(nx * 13, ny * 13, seed + 17) * 0.5) / 1.5);
+  return (blueNoiseTile[positiveModulo(ny + seed * 13, 32) * 32 + positiveModulo(nx + seed * 7, 32)] + 0.5) / 256;
 }
 
 function diffuse(work: Float32Array, width: number, height: number, x: number, y: number, error: number, offsets: Array<[number, number, number]>) {
@@ -308,6 +309,14 @@ function uploadBayerTexture(gl: WebGL2RenderingContext, size: number) {
   return texture;
 }
 
+function uploadBlueTexture(gl: WebGL2RenderingContext) {
+  const texture = gl.createTexture(); if (!texture) throw new Error("Could not create blue-noise texture.");
+  gl.bindTexture(gl.TEXTURE_2D,texture);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.R8,32,32,0,gl.RED,gl.UNSIGNED_BYTE,new Uint8Array(blueNoiseTile));return texture;
+}
+
 const ditherVertexShader = `#version 300 es
 in vec2 a_position;
 in vec2 a_uv;
@@ -322,6 +331,7 @@ const ditherFragmentShader = `#version 300 es
 precision highp float;
 uniform sampler2D u_source;
 uniform sampler2D u_bayer;
+uniform sampler2D u_blue;
 uniform vec2 u_outputSize;
 uniform vec2 u_sampleSize;
 uniform int u_algorithm;
@@ -377,7 +387,7 @@ float noiseThreshold(vec2 point, bool blueNoise) {
   if (!blueNoise) {
     return rand(noisePoint, u_noiseSeed);
   }
-  return clamp01((rand(noisePoint * 5.0, u_noiseSeed) + rand(noisePoint * 13.0, u_noiseSeed + 17.0) * 0.5) / 1.5);
+  return texture(u_blue, (mod(noisePoint + vec2(u_noiseSeed * 7.0, u_noiseSeed * 13.0), 32.0) + 0.5) / 32.0).r;
 }
 
 float halftoneThreshold(vec2 point) {
@@ -485,6 +495,7 @@ function renderDitherImageGpu({
   const sourceTexture = uploadTextureFromCanvas(gl, sourceCanvas);
   const bayerSize = Math.max(2, Math.round(settings.bayerSize));
   const bayerTexture = uploadBayerTexture(gl, bayerSize);
+  const blueTexture = uploadBlueTexture(gl);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, sourceTexture);
   gl.uniform1i(gl.getUniformLocation(program, "u_source"), 0);
@@ -492,6 +503,7 @@ function renderDitherImageGpu({
   gl.bindTexture(gl.TEXTURE_2D, bayerTexture);
   gl.uniform1i(gl.getUniformLocation(program, "u_bayer"), 1);
 
+  gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D,blueTexture);gl.uniform1i(gl.getUniformLocation(program,"u_blue"),2);
   const shadow = hexToRgb(settings.shadowColor);
   const mid = hexToRgb(settings.midColor);
   const highlight = hexToRgb(settings.highlightColor);
@@ -530,6 +542,7 @@ function renderDitherImageGpu({
 
   gl.deleteTexture(sourceTexture);
   gl.deleteTexture(bayerTexture);
+  gl.deleteTexture(blueTexture);
   gl.deleteBuffer(buffer);
   gl.deleteProgram(program);
 }
