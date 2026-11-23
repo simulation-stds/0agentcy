@@ -93,7 +93,7 @@ Open Settings in the app and use the tool sections to install or detect dependen
 
 ### Local Video AI
 
-- **Real-ESRGAN ncnn Vulkan**: local upscaling. First-time install should keep the lightweight x2 model as the basic default.
+- **Real-ESRGAN ncnn Vulkan**: shared per-user runtime and models, managed in Settings. Linux installation starts with the lightweight x2 model. See [installation and usage](docs/REALESRGAN.md).
 - **RIFE ncnn Vulkan**: local frame interpolation. First-time install should keep `rife-v4.6` as the basic default.
 - **FaceFusion**: local face swap/enhance. Uses a managed Conda environment and keeps FaceFusion's own model downloads/cache behavior.
 
@@ -160,7 +160,7 @@ Frontend stack:
 - Vite
 - Tailwind CSS 4
 - shadcn/Radix primitives
-- lucide-react plus Material Symbols for older icon surfaces
+- lucide-react for app icons
 
 Backend stack:
 

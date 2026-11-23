@@ -1,4 +1,16 @@
-# Graphify Usage
+# Graphify historical setup notes
+
+For the current checkout-local coding workflow, see `docs/GRAPHIFY_WORKFLOW.md`.
+
+The checkout-local workflow below supersedes the historical setup notes later in this file. The global Graphify MCP connection already exists; do not install or duplicate it for this repository.
+
+From the intended checkout, run `./scripts/graphify.ps1 check` (`--json` is available) before relying on the graph. The check reports checkout, branch, commit, graph path, and new/changed/deleted/excluded files using Graphify's own discovery and content hashes. Code and document/semantic freshness are distinct. `refresh` does local code-only extraction and clustering without LLM calls or HTML; `build` additionally generates visual reports. The extraction cache is probed for write access before either operation. Set `GRAPHIFY_PYTHON` if Graphify is installed outside uv's standard tool location.
+
+Search exact identifiers, errors, filenames, and configuration keys first. Use Graphify for callers, connections, dependencies, and impact. Start MCP `query_graph` at depth 1 and about 1500 tokens, always with this checkout's absolute `project_path`. Narrow by node or relation if output is truncated before raising the budget. Read current definitions, consumers, contracts, and tests before acting; absent graph edges are not proof of absent dependencies. Refresh after a branch switch, merge, or structural edit. Consult current documents for semantic changes.
+
+Graph, manifest, and cache state are ignored and local to each checkout. Do not share `GRAPHIFY_OUT` with another checkout or use a default MCP graph. The historical graph may contain files from before exclusions were tightened. No embeddings, rerankers, or second context service are part of this workflow.
+
+## Historical setup notes
 
 Graphify gives Codex a persistent map of this repo. It indexes code/docs into `graphify-out/graph.json`, then Codex can query that graph instead of repeatedly rereading the whole project.
 
@@ -150,21 +162,7 @@ Keep the graph fresh after code edits:
 
 ## What To Commit
 
-Usually useful:
-
-- `AGENTS.md`
-- `.agents/`
-- `.codex/`
-- `.graphifyignore`
-- `docs/architecture/graphify.md`
-- `graphify-out/graph.json`, if we want the graph available to future sessions
-
-Usually do not commit:
-
-- `.env.local`
-- `graphify-out/cache/`
-- dated Graphify backup folders
-- temporary test outputs under `temp/`
+Commit workflow scripts, instructions, and ignore rules when reviewed. Keep `graphify-out/` local to each checkout, including `graph.json`, `manifest.json`, extraction caches, and visual reports.
 
 ## Indexing Boundaries
 
