@@ -5,17 +5,9 @@ Manage installation under **Settings → Video → Editing → Real-ESRGAN**. Ch
 Individual model download buttons add models without removing installed ones.
 **Repair installation** reinstalls the pinned runtime and refreshes installed
 bundled models. **Check installation** runs a small real inference and reports
-Vulkan/driver errors. Individual models, all models, or the entire runtime and
-models can be removed separately. These changes affect every project for this
-user. Installs and deletion cannot run during a Real-ESRGAN job or comparison.
+Vulkan/driver errors. On Linux, removing a model or runtime detaches it from the current profile. Other profiles can still use the verified installation.
 
-The executable and NCNN `.param`/`.bin` model pairs live together in
-`app_local_data_dir/realesrgan`, outside the source checkout. On Linux this is
-normally `~/.local/share/com.w2ds.videomaxxxing/realesrgan` (or the equivalent
-under `XDG_DATA_HOME`). Launching from another directory or checkout reuses the
-same installation. Administrator access, Python, PyTorch, CUDA and cuDNN packages
-are not required. A working Vulkan implementation/GPU driver and FFmpeg are
-required. GPU drivers and the Vulkan runtime remain system-managed.
+The executable and NCNN `.param`/`.bin` model pairs live together in the [shared Linux runtime store](WORKSPACE.md#shared-linux-tool-installations). Windows and Intel macOS store them under `app_local_data_dir/realesrgan`. Real-ESRGAN needs FFmpeg and a working Vulkan driver. It uses a native executable independent of Python.
 
 The installer uses the official v0.2.5.0 / 20220424 portable distribution.
 Linux x86-64 selects the Ubuntu ZIP and verifies its SHA-256; executable permission
