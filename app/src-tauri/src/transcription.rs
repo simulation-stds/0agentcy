@@ -518,6 +518,12 @@ pub(crate) async fn setup_transcription(
             .arg(&lockfile).arg("--extra-index-url")
             .arg(if device == "cpu" { "https://download.pytorch.org/whl/cpu" } else { "https://download.pytorch.org/whl/cu128" })
             .arg("--index-strategy").arg("unsafe-best-match");
+        #[cfg(target_os = "linux")]
+        if device == "cuda" {
+            // The CUDA lock uses PyTorch CUDA wheels and the CPU TorchCodec wheel.
+            // Include its index explicitly so a cached CPU wheel works offline.
+            cmd.args(["--extra-index-url", "https://download.pytorch.org/whl/cpu"]);
+        }
         configure(&mut cmd, &root)?;
         let result = run(&app, &mut cmd);
         #[cfg(target_os = "linux")]

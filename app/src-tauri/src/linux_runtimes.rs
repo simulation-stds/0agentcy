@@ -477,7 +477,8 @@ fn import_assets(source: &Path) -> Result<(), String> {
     }
     let wan = source.join("tools/wan21/models/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth");
     const WAN_ENCODER: &str = "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d";
-    if wan.is_file() {
+    let name = root.join("assets/wan/models_t5_umt5-xxl-enc-bf16.pth");
+    if wan.is_file() && !name.is_file() {
         if file_digest(&wan)? != WAN_ENCODER {
             return Err(format!(
                 "Wan text encoder checksum did not match: {}",
@@ -485,11 +486,8 @@ fn import_assets(source: &Path) -> Result<(), String> {
             ));
         }
         let blob = store_blob(&wan, WAN_ENCODER)?;
-        let name = root.join("assets/wan/models_t5_umt5-xxl-enc-bf16.pth");
         fs::create_dir_all(name.parent().unwrap()).map_err(|e| e.to_string())?;
-        if !name.exists() {
-            fs::hard_link(blob, &name).map_err(|e| e.to_string())?;
-        }
+        fs::hard_link(blob, &name).map_err(|e| e.to_string())?;
         eprintln!("Verified shared Wan text encoder at {}", name.display());
     }
     Ok(())
