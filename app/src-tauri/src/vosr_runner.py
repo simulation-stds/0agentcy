@@ -134,6 +134,8 @@ def download_verified(url, destination, size, checksum, *, legacy_partial=None,
             report(f"{destination.name}: verified, reusing completed download", flush=True)
             return destination
         report(f"{destination.name}: existing file failed verification; downloading a replacement", flush=True)
+    if os.environ.get("XTUDIO_OFFLINE_IMPORT") == "1":
+        raise RuntimeError(f"Offline import is missing a verified {Path(destination).name}.")
     if not partial.exists() and legacy_partial and Path(legacy_partial).is_file():
         # Rename, not copy: keep the previous downloader's progress. Xet may
         # have written non-contiguous ranges, so the final checksum is mandatory.
@@ -232,6 +234,8 @@ def download_models(root):
 
 
 def download_auxiliary(url, destination, attempts=5, timeout=30):
+    if os.environ.get("XTUDIO_OFFLINE_IMPORT") == "1":
+        raise RuntimeError(f"Offline import is missing a verified {Path(destination).name}.")
     """Bounded retries for small source archives and license notices."""
     destination = Path(destination)
     temporary = destination.with_name(destination.name + ".tmp")

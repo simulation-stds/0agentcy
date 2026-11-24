@@ -17,28 +17,24 @@ output. No inference-time downloads occur after installation.
 
 ## Shared installation
 
-The default root is `<app local data>/shared/vosr`, resolved by the app's fixed
-identifier (`com.w2ds.videomaxxxing`), independent of the current working directory
-or Git checkout. Settings displays the resolved environment and model paths.
-For a custom disk, set `VIDEOMAXXING_SHARED_MODELS` to an absolute directory
-**before launching every checkout**; VOSR uses its `vosr` subdirectory.
+On Linux, VOSR uses a verified generation in the [shared runtime store](WORKSPACE.md#shared-linux-tool-installations). Settings displays the selected environment and model paths. The store owns the Linux uv bootstrap, managed Python, and package cache. The original app-data install remains a fallback during migration.
+
+On Windows, the default root is `<app local data>/shared/vosr`. An absolute `VIDEOMAXXING_SHARED_MODELS` selects a different parent directory for its `vosr` subdirectory.
 
 ```text
 shared/vosr/
-  installer/                     private uv bootstrap
-  python/                        managed Python interpreter
   runtimes/vosr2-v1/env/          dedicated Python packages
   runtimes/vosr2-v1/worker.py     application-owned runner
   models/<model revision>/       verified bundle and resumable .part files
   code/                          pinned upstream source and its license
   dino/                          pinned vision encoder source and its license
   licenses/                      additional upstream notices
-  cache/                         private package/model caches
+  cache/                         feature-specific model caches
   operation.lock                 OS-managed exclusive install/job lock
 ```
 
-All checkouts use the same root. A file lock prevents simultaneous installation
-or inference against it and releases automatically if the app exits. Readiness
+Ordinary Linux checkouts select the same compatible installation. A file lock
+coordinates setup and repair. Staging can build its own candidate. Readiness
 requires successful dependency import, model-file validation and a marker tied
 to this integration's runner and requirements. An interrupted installation can
 be resumed with Install; Repair reinstalls/checks packages and verifies the

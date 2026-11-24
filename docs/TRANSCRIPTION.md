@@ -7,22 +7,9 @@ and an initial alignment language. Managed setup currently supports Windows and
 Linux x86-64. GPU mode requires a compatible NVIDIA driver; CPU mode is available
 without GPU setup. FFmpeg is supplied through the existing Must haves settings.
 
-Setup verifies the pinned uv archive checksum and provisions a private installer, managed Python 3.12, and a dedicated
-WhisperX 3.8.6 environment in the current user's app-local data directory under
-`transcription/`. It does not install packages into system Python or require
-administrator access. CPU and CUDA environments are separate. Model downloads,
-Python downloads and package caches are shared across media projects. Setup can
-download several GB; other languages and models download on first use. Download
-all required assets before offline use. Media processing is local. Hugging Face
-and pyannote telemetry are disabled for the worker.
+Setup verifies the uv bootstrap and provisions separate CPU and CUDA environments for WhisperX 3.8.6 with Python 3.12. On Linux, the [shared runtime store](WORKSPACE.md#shared-linux-tool-installations) supplies the environments, public model cache, and Python downloads. Transcripts and speaker models remain in the current app profile. Windows stores its environment and cache in the current user's app data under `transcription/`. Setup can download several GB, and other languages and models can download on first use. Media processing stays local and the worker disables Hugging Face and pyannote telemetry.
 
-The app verifies runtime imports, GPU availability when selected, and model
-loading before marking setup ready. **Settings → Audio → Editing** exposes repair and
-removal. Repair resynchronizes pinned packages and retries missing model downloads.
-Removing a runtime preserves subtitle projects; model downloads can be removed
-separately with the runtime. The shared installer, Python download, and package
-cache are retained for reinstalling. Interrupted setup does not produce a ready
-marker, and can be retried. Cancellation terminates the current process group.
+Setup verifies runtime imports, GPU availability when selected, and model loading before publishing the environment. On Linux, **Repair** prepares a fresh generation beside the previous one. Removing a runtime detaches it from the current profile and preserves subtitle projects and shared downloads. Interrupted setup can be retried. Cancellation terminates the current process group.
 
 Transcription accepts the whole file or selected range. Source-relative times are
 preserved. WhisperX recognizes speech and aligns words; the worker groups words

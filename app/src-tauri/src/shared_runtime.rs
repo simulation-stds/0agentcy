@@ -1,7 +1,14 @@
 //! Optional machine-local routing of managed Python tools to shared package storage.
-use serde_json::Value;
-use std::{fs, path::Path, process::Command};
+use std::{path::Path, process::Command};
+#[cfg(not(target_os = "linux"))]
+use {serde_json::Value, std::fs};
 
+#[cfg(target_os = "linux")]
+pub fn configure(_: &Path, _: &mut Command) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn configure(workspace: &Path, command: &mut Command) -> Result<(), String> {
     let config_path = workspace.join("shared-runtimes.local.json");
     if !config_path.is_file() {

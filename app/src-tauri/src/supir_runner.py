@@ -51,6 +51,8 @@ def atomic_copy(source, target):
 
 
 def download_small(url, destination):
+    if os.environ.get("XTUDIO_OFFLINE_IMPORT") == "1":
+        raise RuntimeError(f"Offline import is missing a verified {Path(destination).name}.")
     last = None
     for attempt in range(5):
         try:

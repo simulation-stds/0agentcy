@@ -7,13 +7,7 @@ PyTorch 2.1.2+cu121, torchvision 0.16.2+cu121 and xFormers 0.0.23.post1.
 The Python requirements keep the upstream dependency generation, with a
 compatible Hugging Face Hub pin and fsspec 2023.6.0 to satisfy its dependency.
 
-Shared storage defaults to $XDG_DATA_HOME/com.w2ds.videomaxxxing/shared/supir
-(or ~/.local/share when XDG_DATA_HOME is unset). An absolute
-VIDEOMAXXING_SHARED_MODELS override places it under that directory's supir child.
-The source, checkpoints, managed Python, environment and package/model caches
-are shared across checkouts. Source/checkpoint paths in the old Windows copy
-are not modified. Install imports existing checkpoints by copying with progress;
-original files remain in place. Conflicting files are not overwritten.
+SUPIR uses a verified generation in the [shared Linux runtime store](WORKSPACE.md#shared-linux-tool-installations). Compatible checkouts reuse the source, model weights, and Python environment, and the store provides the managed Python and package cache. The original app-data install remains available during migration. Setup can import existing checkpoints and leaves their originals in place.
 
 The installer reuses the managed uv bootstrap and does not require Conda or a
 system CUDA Toolkit. It installs the pinned GPU stack before Python dependencies,

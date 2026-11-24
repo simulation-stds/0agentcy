@@ -88,6 +88,20 @@ fn default_vae_tile_overlap() -> u32 {
 }
 
 fn root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let legacy = legacy_root(app)?;
+    #[cfg(target_os = "linux")]
+    return Ok(managed()?.selected(&legacy));
+    #[cfg(not(target_os = "linux"))]
+    Ok(legacy)
+}
+
+#[cfg(target_os = "linux")]
+fn managed() -> Result<crate::linux_runtimes::Runtime, String> {
+    crate::linux_runtimes::Runtime::new("vosr", &format!("{}:python3.11:torch2.8-cu128:{MODEL_REVISION}", fingerprint()))
+}
+
+fn legacy_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(not(target_os = "linux"))]
     if let Some(custom) = std::env::var_os("VIDEOMAXXING_SHARED_MODELS") {
         let path = PathBuf::from(custom);
         if !path.is_absolute() {
@@ -140,7 +154,9 @@ fn ready(root: &Path) -> bool {
         && root.join("code/inference_vosr_onestep.py").is_file()
         && root.join("dino/hubconf.py").is_file()
         && models_ready(root)
-        && fs::read_to_string(runtime(root).join("ready")).is_ok_and(|value| value == fingerprint())
+        && fs::read_to_string(runtime(root).join("ready")).is_ok_and(|value| {
+            value == fingerprint() || (cfg!(target_os = "linux") && value == "eaf9537e221a851ef9b3e2f0924ce4fdce14d567de4334b6fc391a31a5602b46")
+        })
 }
 
 fn configure(command: &mut Command, root: &Path) {
@@ -160,6 +176,7 @@ fn configure(command: &mut Command, root: &Path) {
         .env("HF_HOME", root.join("cache/huggingface"))
         .env("TORCH_HOME", root.join("cache/torch"))
         .env("PYTHONUNBUFFERED", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("PYTHONNOUSERSITE", "1")
         .env("HF_HUB_DISABLE_TELEMETRY", "1")
         .env("XFORMERS_DISABLED", "1")
@@ -167,6 +184,8 @@ fn configure(command: &mut Command, root: &Path) {
         .env_remove("CUDA_VISIBLE_DEVICES")
         .env_remove("PYTHONPATH")
         .env_remove("PYTHONHOME");
+    #[cfg(target_os = "linux")]
+    let _ = crate::linux_runtimes::configure_uv(command);
 }
 
 fn lock(root: &Path) -> Result<fs::File, String> {
@@ -414,9 +433,19 @@ pub(crate) fn installer(app: &tauri::AppHandle, root: &Path) -> Result<PathBuf, 
             )
         }
     };
+    #[cfg(target_os = "linux")]
+    let directory = crate::linux_runtimes::store()?.join("uv/0.9.10");
+    #[cfg(not(target_os = "linux"))]
     let directory = root.join("installer");
+    #[cfg(target_os = "linux")]
+    let _ = root;
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    let _lock = crate::linux_runtimes::file_lock(&directory.join("installer.lock"))?;
     let executable = directory.join(binary);
     if executable.is_file() {
+        #[cfg(target_os = "linux")]
+        crate::linux_runtimes::validate_uv(&executable)?;
         return Ok(executable);
     }
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
@@ -435,11 +464,22 @@ pub(crate) fn installer(app: &tauri::AppHandle, root: &Path) -> Result<PathBuf, 
         let _ = fs::remove_file(&archive);
         return Err("Python installer checksum verification failed. Retry installation.".into());
     }
+    #[cfg(target_os = "linux")]
+    {
+        let unpacked = tempfile::tempdir_in(&directory).map_err(|e| e.to_string())?;
+        extract_archive(&archive, unpacked.path())?;
+        let parent = executable.parent().unwrap();
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::rename(unpacked.path().join(binary), &executable).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "linux"))]
     extract_archive(&archive, &directory)?;
     let _ = fs::remove_file(archive);
     if !executable.is_file() {
         return Err("Python installer executable is missing.".into());
     }
+    #[cfg(target_os = "linux")]
+    crate::linux_runtimes::validate_uv(&executable)?;
     Ok(executable)
 }
 
@@ -447,6 +487,24 @@ pub(crate) fn installer(app: &tauri::AppHandle, root: &Path) -> Result<PathBuf, 
 pub(crate) async fn install_vosr(app: tauri::AppHandle) -> Result<Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = root(&app)?;
+        #[cfg(target_os = "linux")]
+        let managed = managed()?;
+        #[cfg(target_os = "linux")]
+        if crate::linux_runtimes::offline_import() && managed.available() {
+            return status(&app);
+        }
+        #[cfg(target_os = "linux")]
+        let installation = managed.begin()?;
+        #[cfg(target_os = "linux")]
+        let root = {
+            let target = installation.path();
+            let assets = ["models", "code", "dino", "licenses", "cache/huggingface", "cache/torch"];
+            crate::linux_runtimes::seed(&root, target, &assets)?;
+            if !crate::linux_runtimes::staging() {
+                crate::linux_runtimes::seed(&legacy_root(&app)?, target, &assets)?;
+            }
+            target.to_owned()
+        };
         let _guard = lock(&root)?;
         CANCEL.store(false, Ordering::SeqCst);
         let runtime = runtime(&root);
@@ -517,7 +575,14 @@ pub(crate) async fn install_vosr(app: tauri::AppHandle) -> Result<Status, String
             "Downloading and verifying models",
             &mut log,
         )?;
+        #[cfg(target_os = "linux")]
+        crate::linux_runtimes::require_probe(&log, &["runtimeReady", "cudaReady"])?;
         fs::write(runtime.join("ready"), fingerprint()).map_err(|e| e.to_string())?;
+        if !ready(&root) {
+            return Err("VOSR setup did not produce a complete runtime and model bundle.".into());
+        }
+        #[cfg(target_os = "linux")]
+        installation.publish()?;
         emit_progress_detail(
             &app,
             "VOSR 2.0",
@@ -719,7 +784,17 @@ fn skin_mask_python(
     root: &Path,
     log: &mut String,
 ) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    let setup = crate::linux_runtimes::profile_data("vosr-skin", &fingerprint())?;
+    #[cfg(not(target_os = "linux"))]
     let setup = root.join("runtimes/stars-speck-v1");
+    #[cfg(target_os = "linux")]
+    if environment_python(&root.join("runtimes/stars-speck-v1/env")).is_file()
+        && fs::read_to_string(root.join("runtimes/stars-speck-v1/ready"))
+            .is_ok_and(|contents| contents == SKIN_MASK_REQUIREMENTS)
+    {
+        return Ok(environment_python(&root.join("runtimes/stars-speck-v1/env")));
+    }
     let environment = setup.join("env");
     let interpreter = environment_python(&environment);
     let ready = setup.join("ready");
@@ -797,9 +872,20 @@ pub(crate) async fn detect_vosr_skin_mask(
         );
         let mut log = String::new();
         let interpreter = skin_mask_python(&app, &root, &mut log)?;
+        #[cfg(target_os = "linux")]
+        let model_dir = {
+            let ready = root.join("models/stars-speck/stars-speck-character-skin-v1-pro-b2-fp32-dynamic.onnx");
+            if ready.is_file() {
+                root.join("models/stars-speck")
+            } else {
+                crate::linux_runtimes::profile_data("vosr-skin", &fingerprint())?.join("models")
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let model_dir = root.join("models/stars-speck");
         let staging = tempfile::Builder::new()
             .prefix(".skin-mask-")
-            .tempdir_in(&root)
+            .tempdir()
             .map_err(|e| e.to_string())?;
         let script = staging.path().join("worker.py");
         let mask = staging.path().join("mask.png");
@@ -818,7 +904,7 @@ pub(crate) async fn detect_vosr_skin_mask(
             .arg("--long-edge")
             .arg(mode.long_edge())
             .arg("--models")
-            .arg(root.join("models/stars-speck"))
+            .arg(model_dir)
             .arg("--downloader")
             .arg(downloader);
         if let Some(bounds) = crop {

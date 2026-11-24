@@ -1,7 +1,7 @@
 //! Ubuntu SUPIR runtime, isolated from VOSR and shared across checkouts.
 use crate::{
     emit_progress_detail, output_dir_for, output_image_name, run_stage_with_heartbeat,
-    workspace_root, JobProgressRange, JobResult, OutputKind, SupirImageOptions, SupirStatus,
+    JobProgressRange, JobResult, OutputKind, SupirImageOptions, SupirStatus,
     CANCEL_UPSCALE,
 };
 use serde_json::{json, Value};
@@ -19,25 +19,26 @@ const WORKER: &str = include_str!("supir_runner.py");
 const REQUIREMENTS: &str = include_str!("../supir/requirements.txt");
 const CONSTRAINTS: &str = "torch==2.1.2+cu121\ntorchvision==0.16.2+cu121\nxformers==0.0.23.post1\n";
 
-pub(crate) fn root() -> PathBuf {
-    if let Some(path) = env::var_os("VIDEOMAXXING_SHARED_MODELS")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-    {
-        return path.join("supir");
-    }
+fn legacy_root() -> PathBuf {
     env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
         .unwrap_or_else(|| {
             PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".local/share")
         })
         .join("com.w2ds.videomaxxxing/shared/supir")
 }
-fn runtime() -> PathBuf {
-    root().join("runtimes").join(VERSION)
+fn managed() -> Result<crate::linux_runtimes::Runtime, String> {
+    crate::linux_runtimes::Runtime::new("supir", &format!("{}:python3.10:cuda", fingerprint()))
 }
-fn python() -> PathBuf {
-    runtime().join("env/bin/python")
+pub(crate) fn root() -> Result<PathBuf, String> {
+    Ok(managed()?.selected(&legacy_root()))
+}
+fn runtime(root: &Path) -> PathBuf {
+    root.join("runtimes").join(VERSION)
+}
+fn python(root: &Path) -> PathBuf {
+    runtime(root).join("env/bin/python")
 }
 fn fingerprint() -> String {
     format!(
@@ -47,34 +48,27 @@ fn fingerprint() -> String {
         ))
     )
 }
-fn ready() -> bool {
-    python().is_file()
-        && root().join("repo/test.py").is_file()
-        && fs::read_to_string(runtime().join("ready")).is_ok_and(|s| s == fingerprint())
+fn ready(root: &Path) -> bool {
+    python(root).is_file()
+        && root.join("repo/test.py").is_file()
+        && fs::read_to_string(runtime(root).join("ready")).is_ok_and(|value| {
+            value == fingerprint() || (value == "ac0daaca9e8204756570b76f2025a0b9e83a380933d934b8be14ef0a282664c7")
+        })
 }
 fn lock() -> Result<fs::File, String> {
-    fs::create_dir_all(root()).map_err(|e| e.to_string())?;
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root().join("operation.lock"))
-        .map_err(|e| e.to_string())?;
-    file.try_lock()
-        .map_err(|_| "SUPIR is busy in another job or checkout.".to_string())?;
-    Ok(file)
+    let path = crate::linux_runtimes::profile_data("supir-jobs", VERSION)?;
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    crate::linux_runtimes::file_lock(&path.join("operation.lock"))
 }
-fn configure(command: &mut Command) {
+fn configure(command: &mut Command, root: &Path) -> Result<(), String> {
+    crate::linux_runtimes::configure_uv(command)?;
     command
-        .env("UV_PYTHON_INSTALL_DIR", root().join("python"))
-        .env("UV_CACHE_DIR", root().join("cache/uv"))
         .env("UV_HTTP_TIMEOUT", "300")
         .env("UV_HTTP_RETRIES", "5")
         .env("UV_CONCURRENT_DOWNLOADS", "2")
-        .env("HF_HOME", root().join("cache/huggingface"))
-        .env("TORCH_HOME", root().join("cache/torch"))
-        .env("HF_HUB_DOWNLOAD_TIMEOUT", "300")
+        .env("HF_HOME", root.join("cache/huggingface"))
+        .env("TORCH_HOME", root.join("cache/torch"))
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("PYTHONNOUSERSITE", "1")
         .env("PYTHONUNBUFFERED", "1")
         .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -82,21 +76,16 @@ fn configure(command: &mut Command) {
         .env_remove("PYTHONHOME")
         .env_remove("CUDA_VISIBLE_DEVICES")
         .env_remove("XFORMERS_DISABLED");
+    Ok(())
 }
-fn worker(mode: &str) -> Command {
-    let mut command = Command::new(python());
-    command
-        .arg(runtime().join("worker.py"))
-        .arg(mode)
-        .arg("--root")
-        .arg(root());
-    configure(&mut command);
+fn worker(root: &Path, mode: &str) -> Result<Command, String> {
+    let mut command = Command::new(python(root));
+    command.arg(runtime(root).join("worker.py")).arg(mode).arg("--root").arg(root);
+    configure(&mut command, root)?;
     if mode != "prepare" {
-        command
-            .env("HF_HUB_OFFLINE", "1")
-            .env("TRANSFORMERS_OFFLINE", "1");
+        command.env("HF_HUB_OFFLINE", "1").env("TRANSFORMERS_OFFLINE", "1");
     }
-    command
+    Ok(command)
 }
 fn run(
     app: &tauri::AppHandle,
@@ -117,19 +106,31 @@ fn run(
 }
 pub(crate) fn install(app: &tauri::AppHandle) -> Result<JobResult, String> {
     let _guard = lock()?;
+    let current = root()?;
+    let managed = managed()?;
+    if crate::linux_runtimes::offline_import() && managed.available() {
+        return Ok(JobResult { output_path: current.display().to_string(), log: "SUPIR is already shared.".into() });
+    }
+    let installation = managed.begin()?;
+    let root = installation.path();
+    let assets = ["repo", "checkpoints", "models", "cache/huggingface", "cache/torch"];
+    crate::linux_runtimes::seed(&current, root, &assets)?;
+    if !crate::linux_runtimes::staging() {
+        crate::linux_runtimes::seed(&legacy_root(), root, &assets)?;
+    }
     CANCEL_UPSCALE.store(false, Ordering::SeqCst);
-    fs::create_dir_all(runtime()).map_err(|e| e.to_string())?;
-    fs::write(runtime().join("worker.py"), WORKER).map_err(|e| e.to_string())?;
-    fs::write(runtime().join("requirements.txt"), REQUIREMENTS).map_err(|e| e.to_string())?;
-    fs::write(runtime().join("constraints.txt"), CONSTRAINTS).map_err(|e| e.to_string())?;
-    let uv = crate::vosr::installer(app, &root())?;
+    fs::create_dir_all(runtime(root)).map_err(|e| e.to_string())?;
+    fs::write(runtime(root).join("worker.py"), WORKER).map_err(|e| e.to_string())?;
+    fs::write(runtime(root).join("requirements.txt"), REQUIREMENTS).map_err(|e| e.to_string())?;
+    fs::write(runtime(root).join("constraints.txt"), CONSTRAINTS).map_err(|e| e.to_string())?;
+    let uv = crate::vosr::installer(app, root)?;
     let mut log = String::new();
-    if !python().is_file() {
+    if !python(root).is_file() {
         let mut command = Command::new(&uv);
         command
             .args(["venv", "--managed-python", "--python", "3.10"])
-            .arg(runtime().join("env"));
-        configure(&mut command);
+            .arg(runtime(root).join("env"));
+        configure(&mut command, root)?;
         run(app, &mut command, "SUPIR Python environment", &mut log)?;
     }
     for (packages, index, no_deps) in [
@@ -147,30 +148,30 @@ pub(crate) fn install(app: &tauri::AppHandle) -> Result<JobResult, String> {
         let mut command = Command::new(&uv);
         command
             .args(["pip", "install", "--python"])
-            .arg(python())
+            .arg(python(root))
             .arg("--index-url")
             .arg(index)
             .args(packages);
         if no_deps {
             command.args(["--no-deps", "--only-binary", ":all:"]);
         }
-        configure(&mut command);
+        configure(&mut command, root)?;
         run(app, &mut command, "SUPIR GPU packages", &mut log)?;
     }
     let mut dependencies = Command::new(&uv);
     dependencies
         .args(["pip", "install", "--python"])
-        .arg(python())
+        .arg(python(root))
         .arg("-r")
-        .arg(runtime().join("requirements.txt"))
+        .arg(runtime(root).join("requirements.txt"))
         .arg("--constraint")
-        .arg(runtime().join("constraints.txt"));
-    configure(&mut dependencies);
+        .arg(runtime(root).join("constraints.txt"));
+    configure(&mut dependencies, root)?;
     run(app, &mut dependencies, "SUPIR dependencies", &mut log)?;
-    let mut prepare = worker("prepare");
+    let mut prepare = worker(root, "prepare")?;
     prepare
         .arg("--legacy")
-        .arg(workspace_root().join("tools/supir"));
+        .arg(crate::linux_runtimes::legacy_checkout().join("tools/supir"));
     run(
         app,
         &mut prepare,
@@ -179,23 +180,32 @@ pub(crate) fn install(app: &tauri::AppHandle) -> Result<JobResult, String> {
     )?;
     run(
         app,
-        &mut worker("probe"),
+        &mut worker(root, "probe")?,
         "SUPIR runtime verification",
         &mut log,
     )?;
-    fs::write(runtime().join("ready"), fingerprint()).map_err(|e| e.to_string())?;
+    crate::linux_runtimes::require_probe(&log, &["runtimeReady", "cudaReady", "xformersReady"])?;
+    fs::write(runtime(root).join("ready"), fingerprint()).map_err(|e| e.to_string())?;
+    let installed = installation.publish()?;
     Ok(JobResult {
-        output_path: root().display().to_string(),
+        output_path: installed.display().to_string(),
         log,
     })
 }
 pub(crate) fn status() -> SupirStatus {
+    match root() {
+        Ok(root) => status_at(&root),
+        Err(message) => SupirStatus { state: "needs_setup".into(), message, ..status_at(Path::new("")) },
+    }
+}
+
+fn status_at(root: &Path) -> SupirStatus {
     let mut data = json!({});
     let mut detail =
         "Install SUPIR to create its dedicated Ubuntu environment and import existing model files."
             .to_string();
-    if ready() {
-        match worker("probe").output() {
+    if ready(root) {
+        match worker(root, "probe").and_then(|mut command| command.output().map_err(|e| e.to_string())) {
             Ok(result) if result.status.success() => {
                 data = String::from_utf8_lossy(&result.stdout)
                     .lines()
@@ -220,7 +230,7 @@ pub(crate) fn status() -> SupirStatus {
             Err(error) => detail = format!("SUPIR runtime could not start: {error}"),
         }
     }
-    let checkpoints = root().join("checkpoints");
+    let checkpoints = root.join("checkpoints");
     let models = checkpoints
         .join("sd_xl_base_1.0_0.9vae.safetensors")
         .is_file()
@@ -246,8 +256,8 @@ pub(crate) fn status() -> SupirStatus {
             "needs_setup"
         }
         .into(),
-        repo_path: root().join("repo").display().to_string(),
-        env_name: runtime().join("env").display().to_string(),
+        repo_path: root.join("repo").display().to_string(),
+        env_name: runtime(root).join("env").display().to_string(),
         checkpoint_path: checkpoints.display().to_string(),
         current_size_label: "Shared storage".into(),
         estimated_install_label:
@@ -266,38 +276,14 @@ pub(crate) fn status() -> SupirStatus {
     }
 }
 pub(crate) fn xformers(app: &tauri::AppHandle, remove: bool) -> Result<JobResult, String> {
+    if !remove {
+        return install(app);
+    }
     let _guard = lock()?;
-    CANCEL_UPSCALE.store(false, Ordering::SeqCst);
-    if !python().is_file() {
-        return Err("Install SUPIR's Ubuntu environment first.".into());
-    }
-    let uv = crate::vosr::installer(app, &root())?;
-    let mut command = Command::new(uv);
-    command
-        .args([
-            "pip",
-            if remove { "uninstall" } else { "install" },
-            "--python",
-        ])
-        .arg(python());
-    if remove {
-        command.arg("xformers");
-    } else {
-        command.args([
-            "--no-deps",
-            "--only-binary",
-            ":all:",
-            "--index-url",
-            "https://download.pytorch.org/whl/cu121",
-            "xformers==0.0.23.post1",
-        ]);
-    }
-    configure(&mut command);
-    let mut log = String::new();
-    run(app, &mut command, "SUPIR xFormers", &mut log)?;
+    managed()?.detach()?;
     Ok(JobResult {
-        output_path: root().display().to_string(),
-        log,
+        output_path: root()?.display().to_string(),
+        log: "SUPIR was removed from this workspace. The shared xFormers installation is still available to other workspaces.".into(),
     })
 }
 fn validate(options: &SupirImageOptions) -> Result<(), String> {
@@ -322,7 +308,8 @@ pub(crate) fn run_image(
     validate(&options)?;
     let device = options.device.as_deref().unwrap_or("").trim();
     let _guard = lock()?;
-    if !ready() {
+    let root = root()?;
+    if !ready(&root) {
         return Err("Install SUPIR's Ubuntu runtime in Settings first.".into());
     }
     let output = output_dir_for(OutputKind::Image)?;
@@ -336,7 +323,7 @@ pub(crate) fn run_image(
     }
     let staging = tempfile::tempdir_in(&output).map_err(|e| e.to_string())?;
     let staged = staging.path().join("result.png");
-    let mut command = worker("run");
+    let mut command = worker(&root, "run")?;
     command
         .arg("--input")
         .arg(&options.input_path)
@@ -350,6 +337,7 @@ pub(crate) fn run_image(
         .arg(&options.upscale);
     if options.use_llava {
         command
+            .env("HF_HOME", crate::linux_runtimes::profile_data("supir-llava", VERSION)?)
             .arg("--llava")
             .env_remove("HF_HUB_OFFLINE")
             .env_remove("TRANSFORMERS_OFFLINE");

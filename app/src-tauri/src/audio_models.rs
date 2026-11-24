@@ -62,8 +62,12 @@ impl AudioModel {
         }
     }
 
-    fn directory(self) -> PathBuf {
-        workspace_root().join("tools").join(match self {
+    fn legacy_directory(self) -> PathBuf {
+        #[cfg(target_os = "linux")]
+        let workspace = crate::linux_runtimes::legacy_checkout();
+        #[cfg(not(target_os = "linux"))]
+        let workspace = workspace_root();
+        workspace.join("tools").join(match self {
             Self::Bandit => "bandit",
             Self::Deepfilter => "deepfilternet",
         })
@@ -140,6 +144,46 @@ fn active_bandit_device(root: &Path) -> BanditDevice {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn managed(model: AudioModel, device: BanditDevice) -> Result<crate::linux_runtimes::Runtime, String> {
+    use crate::linux_runtimes::Runtime;
+    match model {
+        AudioModel::Bandit => Runtime::new("bandit", &format!(
+            "v1:{}:python3.12:{:?}:{BANDIT_PACKAGE}:{BANDIT_HASH}:numpy2.2.6:soundfile0.13.1",
+            device.argument(), device.torch_install_args()?
+        )),
+        AudioModel::Deepfilter => Runtime::new("deepfilternet", deep_asset()?.1),
+    }
+}
+
+fn audio_directory(model: AudioModel) -> Result<PathBuf, String> {
+    let legacy = model.legacy_directory();
+    #[cfg(target_os = "linux")]
+    {
+        let preferred = match model {
+            AudioModel::Bandit => match crate::linux_runtimes::preference("bandit-device").as_deref() {
+                Some("cuda") => BanditDevice::Cuda,
+                Some("cpu") => BanditDevice::Cpu,
+                _ => active_bandit_device(&legacy),
+            },
+            AudioModel::Deepfilter => BanditDevice::Cpu,
+        };
+        let preferred_root = managed(model, preferred)?.selected(&legacy);
+        if matches!(model, AudioModel::Bandit) && !status(model, &preferred_root).installed {
+            let other = if preferred == BanditDevice::Cpu { BanditDevice::Cuda } else { BanditDevice::Cpu };
+            if let Ok(runtime) = managed(model, other) {
+                let other_root = runtime.selected(&legacy);
+                if status(model, &other_root).installed {
+                    return Ok(other_root);
+                }
+            }
+        }
+        return Ok(preferred_root);
+    }
+    #[cfg(not(target_os = "linux"))]
+    Ok(legacy)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AudioModelStatus {
@@ -192,8 +236,8 @@ fn status(model: AudioModel, root: &Path) -> AudioModelStatus {
 }
 
 #[tauri::command]
-pub(crate) fn audio_model_status(model: AudioModel) -> AudioModelStatus {
-    status(model, &model.directory())
+pub(crate) fn audio_model_status(model: AudioModel) -> Result<AudioModelStatus, String> {
+    Ok(status(model, &audio_directory(model)?))
 }
 
 #[tauri::command]
@@ -207,25 +251,84 @@ pub(crate) async fn manage_audio_model(
         let _guard = AUDIO_MODEL_LOCK
             .try_lock()
             .map_err(|_| "An audio model is busy.")?;
-        let root = model.directory();
-        if uninstall {
-            remove_install(&root)?;
-        } else {
-            let ffmpeg =
-                find_tool("ffmpeg").ok_or("Install FFmpeg in Settings → Must haves first.")?;
-            install(
-                model,
-                &root,
-                &ffmpeg,
-                bandit_device.unwrap_or_else(|| active_bandit_device(&root)),
-                |url, path| download_with_progress(&app, model.label(), url, path),
-                |message| emit_progress_detail(&app, model.label(), message.into(), None, None),
-            )?;
+        #[cfg(target_os = "linux")]
+        return manage_linux(&app, model, uninstall, bandit_device);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let root = model.legacy_directory();
+            if uninstall {
+                remove_install(&root)?;
+            } else {
+                let ffmpeg =
+                    find_tool("ffmpeg").ok_or("Install FFmpeg in Settings → Must haves first.")?;
+                install(
+                    model,
+                    &root,
+                    &ffmpeg,
+                    bandit_device.unwrap_or_else(|| active_bandit_device(&root)),
+                    None,
+                    |url, path| download_with_progress(&app, model.label(), url, path),
+                    |message| emit_progress_detail(&app, model.label(), message.into(), None, None),
+                )?;
+            }
+            Ok(status(model, &root))
         }
-        Ok(status(model, &root))
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[cfg(target_os = "linux")]
+fn manage_linux(
+    app: &tauri::AppHandle,
+    model: AudioModel,
+    uninstall: bool,
+    device: Option<BanditDevice>,
+) -> Result<AudioModelStatus, String> {
+    let source = audio_directory(model)?;
+    if uninstall {
+        managed(model, BanditDevice::Cpu)?.detach()?;
+        if matches!(model, AudioModel::Bandit) {
+            if let Ok(cuda) = managed(model, BanditDevice::Cuda) {
+                cuda.detach()?;
+            }
+        }
+        return audio_model_status(model);
+    }
+    let device = device.unwrap_or_else(|| active_bandit_device(&source));
+    let runtime = managed(model, device)?;
+    if crate::linux_runtimes::offline_import() && runtime.available() {
+        return Ok(status(model, &runtime.selected(&source)));
+    }
+    let installation = runtime.begin()?;
+    let ffmpeg = find_tool("ffmpeg").ok_or("Install FFmpeg using the system package manager.")?;
+    let legacy = model.legacy_directory();
+    let asset = match model {
+        AudioModel::Bandit => BANDIT_MODEL,
+        AudioModel::Deepfilter => "deep-filter",
+    };
+    crate::linux_runtimes::seed(&source, installation.path(), &[asset])?;
+    crate::linux_runtimes::seed(&legacy, installation.path(), &[asset])?;
+    let uv = match model {
+        AudioModel::Bandit => Some(match crate::linux_runtimes::previous_uv() {
+            Some(existing) => existing,
+            None => crate::vosr::installer(app, installation.path())?,
+        }),
+        AudioModel::Deepfilter => None,
+    };
+    install(
+        model, installation.path(), &ffmpeg, device, uv.as_deref(),
+        |url, path| download_with_progress(app, model.label(), url, path),
+        |message| emit_progress_detail(app, model.label(), message.into(), None, None),
+    )?;
+    if matches!(model, AudioModel::Bandit) {
+        crate::linux_runtimes::seal_weight(&installation.path().join(BANDIT_MODEL))?;
+    }
+    let path = installation.publish()?;
+    if matches!(model, AudioModel::Bandit) {
+        crate::linux_runtimes::write_preference("bandit-device", device.argument())?;
+    }
+    Ok(status(model, &path))
 }
 
 fn remove_install(root: &Path) -> Result<(), String> {
@@ -241,6 +344,7 @@ fn install(
     root: &Path,
     ffmpeg: &str,
     bandit_device: BanditDevice,
+    uv: Option<&Path>,
     download: impl Fn(&str, &Path) -> Result<(), String>,
     report: impl Fn(&str),
 ) -> Result<(), String> {
@@ -258,7 +362,7 @@ fn install(
                 BanditDevice::Cpu => "Checking Bandit CPU runtime",
                 BanditDevice::Cuda => "Checking Bandit NVIDIA CUDA runtime",
             });
-            ensure_bandit_runtime(root, bandit_device)?;
+            ensure_bandit_runtime(root, bandit_device, uv)?;
             if !matches_sha256(&root.join(BANDIT_MODEL), BANDIT_HASH) {
                 install_asset(
                     &download,
@@ -324,7 +428,7 @@ fn install(
     Ok(())
 }
 
-fn ensure_bandit_runtime(root: &Path, device: BanditDevice) -> Result<(), String> {
+fn ensure_bandit_runtime(root: &Path, device: BanditDevice, installer: Option<&Path>) -> Result<(), String> {
     let torch_args = device.torch_install_args()?;
     let python = bandit_python(root, device);
     let marker = device.runtime_marker(root);
@@ -376,32 +480,22 @@ fn ensure_bandit_runtime(root: &Path, device: BanditDevice) -> Result<(), String
             "soundfile==0.13.1",
         ]))?;
     } else {
-        let uv = find_tool("uv")
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(|home| PathBuf::from(home).join(".local/bin/uv"))
-                    .filter(|path| path.is_file())
-            })
-            .ok_or("Install uv and make it available on PATH to set up Bandit on Linux.")?;
-        checked(
-            Command::new(&uv)
-                .args(["venv", "--python", "3.12"])
-                .arg(&env_dir),
-        )?;
-        checked(
-            Command::new(&uv)
-                .args(["pip", "install", "--python"])
-                .arg(&python)
-                .env("UV_HTTP_TIMEOUT", "180")
-                .args(torch_args),
-        )?;
-        checked(
-            Command::new(uv)
-                .args(["pip", "install", "--python"])
-                .arg(&python)
-                .args([BANDIT_PACKAGE, "numpy==2.2.6", "soundfile==0.13.1"]),
-        )?;
+        let uv = installer.map(Path::to_owned).or_else(|| find_tool("uv").map(PathBuf::from))
+            .ok_or("The Python installer is unavailable.")?;
+        let mut create = Command::new(&uv);
+        let mut torch = Command::new(&uv);
+        let mut dependencies = Command::new(&uv);
+        #[cfg(target_os = "linux")]
+        if installer.is_some() {
+            for command in [&mut create, &mut torch, &mut dependencies] {
+                crate::linux_runtimes::configure_uv(command)?;
+            }
+        }
+        checked(create.args(["venv", "--python", "3.12"]).arg(&env_dir))?;
+        checked(torch.args(["pip", "install", "--python"]).arg(&python)
+            .env("UV_HTTP_TIMEOUT", "180").args(torch_args))?;
+        checked(dependencies.args(["pip", "install", "--python"]).arg(&python)
+            .args([BANDIT_PACKAGE, "numpy==2.2.6", "soundfile==0.13.1"]))?;
     }
     check_bandit_runtime(&python, device)?;
     fs::write(marker, b"").map_err(|error| error.to_string())
@@ -426,7 +520,7 @@ fn check_bandit_runtime(python: &Path, device: BanditDevice) -> Result<(), Strin
 fn bandit_command(root: &Path, device: BanditDevice) -> Command {
     let mut command = Command::new(bandit_python(root, device));
     command
-        .args(["-I", "-c", include_str!("bandit_audio.py")])
+        .args(["-I", "-B", "-c", include_str!("bandit_audio.py")])
         .arg(root.join(BANDIT_MODEL))
         .arg(BANDIT_HASH)
         .arg(device.argument());
@@ -676,7 +770,7 @@ fn run_model(
     options: AudioJobOptions,
     selection: bool,
 ) -> Result<AudioModelResult, String> {
-    let root = model.directory();
+    let root = audio_directory(model)?;
     if !status(model, &root).installed {
         return Err(format!(
             "Install or repair {} in Settings → Audio → Editing.",
@@ -997,6 +1091,7 @@ mod tests {
             &root,
             &ffmpeg,
             BanditDevice::Cpu,
+            None,
             bad_download,
             report,
         )
@@ -1005,12 +1100,12 @@ mod tests {
         assert!(!status(model, &root).installed);
         assert!(!root.join(installed_file).exists());
 
-        install(model, &root, &ffmpeg, BanditDevice::Cpu, download, report).unwrap();
+        install(model, &root, &ffmpeg, BanditDevice::Cpu, None, download, report).unwrap();
         assert!(status(model, &root).installed);
         assert_eq!(downloads.get(), 1);
 
         fs::write(root.join(installed_file), b"damaged asset").unwrap();
-        install(model, &root, &ffmpeg, BanditDevice::Cpu, download, report).unwrap();
+        install(model, &root, &ffmpeg, BanditDevice::Cpu, None, download, report).unwrap();
         assert!(status(model, &root).installed);
         assert_eq!(downloads.get(), 2);
 
@@ -1043,6 +1138,7 @@ mod tests {
             &root,
             &ffmpeg,
             BanditDevice::Cuda,
+            None,
             |url, path| {
                 assert_eq!(url, BANDIT_URL);
                 fs::copy(assets.join(BANDIT_MODEL), path)
