@@ -34,7 +34,23 @@ pub(crate) fn init(app: &tauri::AppHandle) -> Result<(), String> {
     )
     .map_err(|_| "Real-ESRGAN storage already initialized".to_string())
 }
+#[cfg(target_os = "linux")]
+fn managed() -> Result<crate::linux_runtimes::Runtime, String> {
+    let (_, hash) = package("linux", std::env::consts::ARCH)?;
+    let hash = hash.ok_or("No pinned Real-ESRGAN archive for this platform.")?;
+    crate::linux_runtimes::Runtime::new("realesrgan", &format!("{RELEASE}:{hash}"))
+}
+
 pub(crate) fn root() -> Result<PathBuf, String> {
+    let path = ROOT.get().ok_or("Real-ESRGAN storage is not initialized")?;
+    #[cfg(target_os = "linux")]
+    return Ok(managed()?.selected(path));
+    #[cfg(not(target_os = "linux"))]
+    Ok(path.clone())
+}
+
+#[cfg(target_os = "linux")]
+fn legacy() -> Result<PathBuf, String> {
     ROOT.get()
         .cloned()
         .ok_or("Real-ESRGAN storage is not initialized".into())
@@ -60,6 +76,19 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
+#[cfg(target_os = "linux")]
+pub(crate) fn detach_model(name: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err("Invalid Real-ESRGAN model name.".into());
+    }
+    crate::linux_runtimes::write_preference(&format!("realesrgan-hide-{name}"), "hidden")
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn model_attached(name: &str) -> bool {
+    crate::linux_runtimes::preference(&format!("realesrgan-hide-{name}")).as_deref() != Some("hidden")
+}
+
 pub(crate) fn model_ready(root: &Path, name: &str) -> bool {
     valid_name(name)
         && ["param", "bin"].iter().all(|ext| {
@@ -296,24 +325,68 @@ pub(crate) fn install(
         }
     }
     let (platform, hash) = package(std::env::consts::OS, std::env::consts::ARCH)?;
-    let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let archive = temp.path().join("runtime.zip");
-    let url = format!("https://github.com/xinntao/Real-ESRGAN/releases/download/{RELEASE}/realesrgan-ncnn-vulkan-20220424-{platform}.zip");
-    crate::emit_progress(
-        app,
-        "Real-ESRGAN installation",
-        "Downloading the official runtime and selected models…".into(),
-    );
-    crate::download_with_progress(app, "Real-ESRGAN installation", &url, &archive)?;
-    verify_archive(&archive, hash)?;
+    #[cfg(target_os = "linux")]
+    let managed = managed()?;
+    #[cfg(target_os = "linux")]
+    if crate::linux_runtimes::offline_import() && managed.available() {
+        return Ok(crate::JobResult {
+            output_path: root()?.join(executable_name()).display().to_string(),
+            log: "Real-ESRGAN is already shared.".into(),
+        });
+    }
+    #[cfg(target_os = "linux")]
+    let installation = managed.begin()?;
+    #[cfg(target_os = "linux")]
+    let root = {
+        let target = installation.path();
+        crate::linux_runtimes::seed(&root()?, target, &["models"])?;
+        if !crate::linux_runtimes::staging() {
+            crate::linux_runtimes::seed(&legacy()?, target, &["models"])?;
+        }
+        target.to_owned()
+    };
+    #[cfg(not(target_os = "linux"))]
     let root = root()?;
-    stage_package(&root, &archive, selected)?;
+    #[cfg(target_os = "linux")]
+    let offline = crate::linux_runtimes::offline_import();
+    #[cfg(not(target_os = "linux"))]
+    let offline = false;
+    if offline {
+        #[cfg(target_os = "linux")]
+        {
+            let source = legacy()?;
+            if fs::read_to_string(source.join("version.txt")).ok().is_none_or(|value| value.trim() != format!("{RELEASE} / 20220424")) {
+                return Err("The existing Real-ESRGAN release differs from the pinned release.".into());
+            }
+            crate::linux_runtimes::seed(&source, &root, &[executable_name(), "version.txt", "SOURCE.txt", "models", "README_ubuntu.md"])?;
+        }
+    } else {
+        let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let archive = temp.path().join("runtime.zip");
+        let url = format!("https://github.com/xinntao/Real-ESRGAN/releases/download/{RELEASE}/realesrgan-ncnn-vulkan-20220424-{platform}.zip");
+        crate::emit_progress(
+            app,
+            "Real-ESRGAN installation",
+            "Downloading the official runtime and selected models…".into(),
+        );
+        crate::download_with_progress(app, "Real-ESRGAN installation", &url, &archive)?;
+        verify_archive(&archive, hash)?;
+        stage_package(&root, &archive, selected)?;
+    }
     crate::emit_progress(
         app,
         "Real-ESRGAN installation",
         "Checking GPU inference…".into(),
     );
     let result = checked_probe(&root);
+    #[cfg(target_os = "linux")]
+    {
+        result.as_ref().map_err(|e| e.to_owned())?;
+        installation.publish()?;
+        for name in selected {
+            crate::linux_runtimes::write_preference(&format!("realesrgan-hide-{name}"), "available")?;
+        }
+    }
     let health = match result {
         Ok(_) => (true, None),
         Err(e) => (false, Some(e)),
@@ -450,9 +523,14 @@ pub(crate) async fn check_realesrgan() -> Result<Status, String> {
 pub(crate) async fn uninstall_realesrgan() -> Result<Status, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let _guard = lock()?;
-        let root = root()?;
-        if root.exists() {
-            fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        managed()?.detach()?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let root = root()?;
+            if root.exists() {
+                fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+            }
         }
         invalidate();
         realesrgan_status()

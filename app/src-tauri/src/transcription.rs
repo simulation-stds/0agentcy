@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -63,13 +63,42 @@ fn environment(root: &Path, device: &str) -> PathBuf {
     root.join("runtimes")
         .join(format!("whisperx-{VERSION}-{device}"))
 }
+#[cfg(test)]
 fn python(root: &Path, device: &str) -> PathBuf {
-    environment(root, device).join(if cfg!(windows) {
+    environment_python(&environment(root, device))
+}
+fn environment_python(environment: &Path) -> PathBuf {
+    environment.join(if cfg!(windows) {
         "Scripts/python.exe"
     } else {
         "bin/python"
     })
 }
+fn requirements(device: &str) -> Result<&'static str, String> {
+    match (std::env::consts::OS, device) {
+        ("linux", "cpu") => Ok(include_str!("../whisperx/linux-cpu.txt")),
+        ("linux", "cuda") => Ok(include_str!("../whisperx/linux-cuda.txt")),
+        ("windows", "cpu") => Ok(include_str!("../whisperx/windows-cpu.txt")),
+        ("windows", "cuda") => Ok(include_str!("../whisperx/windows-cuda.txt")),
+        _ => Err("Unsupported transcription platform.".into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn managed(device: &str) -> Result<crate::linux_runtimes::Runtime, String> {
+    crate::linux_runtimes::Runtime::new(
+        "whisperx", &format!("{VERSION}:python3.12:{device}:{}", requirements(device)?)
+    )
+}
+
+fn active_environment(root: &Path, device: &str) -> Result<PathBuf, String> {
+    let legacy = environment(root, device);
+    #[cfg(target_os = "linux")]
+    return Ok(managed(device)?.selected(&legacy));
+    #[cfg(not(target_os = "linux"))]
+    Ok(legacy)
+}
+
 fn device_valid(device: &str) -> Result<(), String> {
     if !matches!(device, "cpu" | "cuda") {
         return Err("Choose CPU or NVIDIA GPU.".into());
@@ -110,19 +139,20 @@ pub(crate) async fn transcription_status(
     tauri::async_runtime::spawn_blocking(move || {
         device_valid(&device)?;
         let root = root(&app)?;
+        let env = active_environment(&root, &device)?;
+        let installed = environment_python(&env).is_file() && env.join("ready").is_file();
         let credentials = crate::transcription_credentials::read();
         let (token_configured, token_persistent, credential_error) = match credentials {
             Ok((token, persistent)) => (token.is_some(), persistent, None),
             Err(error) => (false, false, Some(error)),
         };
         Ok(Status {
-            speaker_model_ready: speakers_ready(&root, &device),
+            speaker_model_ready: installed && speaker_assets_ready(&root, &device),
             token_configured,
             token_persistent,
             credential_error,
-            installed: python(&root, &device).is_file()
-                && environment(&root, &device).join("ready").is_file(),
-            path: root.to_string_lossy().into_owned(),
+            installed,
+            path: env.to_string_lossy().into_owned(),
             gpu_available: gpu_available(),
         })
     })
@@ -255,7 +285,9 @@ fn redact_secret(text: &str, secret: Option<&str>) -> String {
         None => text.to_owned(),
     }
 }
+#[cfg(not(target_os = "linux"))]
 fn download(app: &tauri::AppHandle, url: &str, path: &Path) -> Result<(), String> {
+    use std::io::Read;
     let mut response = ureq::get(url)
         .header("User-Agent", "Videomaxxing")
         .call()
@@ -276,6 +308,7 @@ fn download(app: &tauri::AppHandle, url: &str, path: &Path) -> Result<(), String
     report(app, "Installer downloaded");
     Ok(())
 }
+#[cfg(not(target_os = "linux"))]
 fn installer(app: &tauri::AppHandle, root: &Path) -> Result<PathBuf, String> {
     // A private installer avoids modifying system Python or PATH.
     let directory = root.join("installer");
@@ -339,6 +372,8 @@ fn installer(app: &tauri::AppHandle, root: &Path) -> Result<PathBuf, String> {
     Ok(executable)
 }
 fn configure(command: &mut Command, root: &Path) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let has_existing_models = root.join("models").read_dir().is_ok_and(|mut entries| entries.next().is_some());
     for dir in [
         "models",
         "alignment",
@@ -367,6 +402,21 @@ fn configure(command: &mut Command, root: &Path) -> Result<(), String> {
         .env("HF_HUB_DISABLE_TELEMETRY", "1")
         .env("PYANNOTE_METRICS_ENABLED", "0")
         .env("DO_NOT_TRACK", "1");
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_runtimes::configure_uv(command)?;
+        let shared = crate::linux_runtimes::whisperx_assets()?;
+        if shared.join(".imported").is_file() || !has_existing_models || crate::linux_runtimes::staging() {
+            for folder in ["models", "alignment", "torch", "nltk"] {
+                private_directory(&shared.join(folder))?;
+            }
+            command.env("VMX_MODELS", shared.join("models"))
+                .env("VMX_ALIGN", shared.join("alignment"))
+                .env("TORCH_HOME", shared.join("torch"))
+                .env("NLTK_DATA", shared.join("nltk"));
+        }
+        command.env("PYTHONDONTWRITEBYTECODE", "1");
+    }
     if let Some(ffmpeg) = crate::find_tool("ffmpeg") {
         if let Some(parent) = Path::new(&ffmpeg).parent() {
             let mut paths = vec![parent.to_path_buf()];
@@ -382,9 +432,17 @@ fn configure(command: &mut Command, root: &Path) -> Result<(), String> {
     Ok(())
 }
 fn worker(root: &Path, device: &str, mode: &str) -> Result<Command, String> {
-    let script = root.join("worker.py");
-    fs::write(&script, RUNNER).map_err(|e| e.to_string())?;
-    let mut command = Command::new(python(root, device));
+    worker_in(root, &active_environment(root, device)?, device, mode)
+}
+
+fn worker_in(root: &Path, environment: &Path, device: &str, mode: &str) -> Result<Command, String> {
+    private_directory(root)?;
+    use sha2::{Digest, Sha256};
+    let script = root.join(format!("worker-{:x}.py", Sha256::digest(RUNNER.as_bytes())));
+    if !script.is_file() {
+        atomic_write(&script, RUNNER.as_bytes())?;
+    }
+    let mut command = Command::new(environment_python(environment));
     command
         .arg("-u")
         .arg(script)
@@ -394,7 +452,7 @@ fn worker(root: &Path, device: &str, mode: &str) -> Result<Command, String> {
     configure(&mut command, root)?;
     #[cfg(target_os = "linux")]
     {
-        let base = environment(root, device).join("lib/python3.12/site-packages/nvidia");
+        let base = environment.join("lib/python3.12/site-packages/nvidia");
         let mut paths = Vec::new();
         if let Ok(entries) = fs::read_dir(base) {
             for entry in entries.flatten() {
@@ -430,11 +488,21 @@ pub(crate) async fn setup_transcription(
         if device == "cuda" && !gpu_available() { return Err("No NVIDIA GPU detected. Choose CPU or update your GPU driver.".into()); }
         let root = root(&app)?;
         private_directory(&root)?;
-        let uv = installer(&app, &root)?;
-        let env = environment(&root, &device);
+        #[cfg(target_os = "linux")]
+        let managed = managed(&device)?;
+        #[cfg(target_os = "linux")]
+        if crate::linux_runtimes::offline_import() && managed.available() {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        let installation = managed.begin()?;
+        #[cfg(target_os = "linux")]
+        let (uv, env) = (crate::vosr::installer(&app, &root)?, installation.path().to_owned());
+        #[cfg(not(target_os = "linux"))]
+        let (uv, env) = (installer(&app, &root)?, environment(&root, &device));
         let ready = env.join("ready");
         let _ = fs::remove_file(&ready);
-        if !python(&root, &device).is_file() {
+        if !environment_python(&env).is_file() {
             report(&app, "Creating private Python 3.12 environment");
             let mut cmd = Command::new(&uv);
             cmd.args(["venv", "--python", "3.12", "--managed-python"]).arg(&env);
@@ -443,27 +511,39 @@ pub(crate) async fn setup_transcription(
         }
         report(&app, "Installing WhisperX and compatible runtime packages (this can take several minutes)");
         let mut cmd = Command::new(&uv);
-        let requirements = match (std::env::consts::OS, device.as_str()) {
-            ("linux", "cpu") => include_str!("../whisperx/linux-cpu.txt"),
-            ("linux", "cuda") => include_str!("../whisperx/linux-cuda.txt"),
-            ("windows", "cpu") => include_str!("../whisperx/windows-cpu.txt"),
-            ("windows", "cuda") => include_str!("../whisperx/windows-cuda.txt"),
-            _ => return Err("Unsupported transcription platform.".into()),
-        };
-        let lockfile = root.join(format!("requirements-{device}.txt"));
+        let requirements = requirements(&device)?;
+        let lockfile = env.join(format!("requirements-{device}.txt"));
         fs::write(&lockfile, requirements).map_err(|e| e.to_string())?;
-        cmd.args(["pip", "sync", "--reinstall", "--python"]).arg(python(&root, &device))
+        cmd.args(["pip", "sync", "--reinstall", "--python"]).arg(environment_python(&env))
             .arg(&lockfile).arg("--extra-index-url")
             .arg(if device == "cpu" { "https://download.pytorch.org/whl/cpu" } else { "https://download.pytorch.org/whl/cu128" })
             .arg("--index-strategy").arg("unsafe-best-match");
         configure(&mut cmd, &root)?;
-        run(&app, &mut cmd)?;
+        let result = run(&app, &mut cmd);
+        #[cfg(target_os = "linux")]
+        if result.is_err() && crate::linux_runtimes::offline_import() {
+            if let Some(previous) = crate::linux_runtimes::previous_uv() {
+                let args = cmd.get_args().map(|arg| arg.to_owned()).collect::<Vec<_>>();
+                let mut retry = Command::new(previous);
+                retry.args(args);
+                configure(&mut retry, &root)?;
+                run(&app, &mut retry)?;
+            } else {
+                result?;
+            }
+        } else {
+            result?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        result?;
         report(&app, "Verifying runtime");
-        run(&app, &mut worker(&root, &device, "verify")?)?;
-        let mut cmd = worker(&root, &device, "prepare")?;
+        run(&app, &mut worker_in(&root, &env, &device, "verify")?)?;
+        let mut cmd = worker_in(&root, &env, &device, "prepare")?;
         cmd.arg("--model").arg(&model).arg("--language").arg(language);
         run(&app, &mut cmd)?;
         fs::write(ready, VERSION).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        installation.publish()?;
         report(&app, "Transcription ready");
         Ok(())
     }).await.map_err(|e| e.to_string())?
@@ -593,30 +673,42 @@ pub(crate) async fn remove_transcription(
             .try_lock()
             .map_err(|_| "Wait for the transcription operation to finish.")?;
         device_valid(&device)?;
-        let root = root(&app)?;
-        let env = environment(&root, &device);
-        if env.exists() {
-            fs::remove_dir_all(env).map_err(|e| e.to_string())?;
-        }
-        if models {
-            for mode in ["cpu", "cuda"] {
-                let _ = fs::remove_file(speaker_marker(&root, mode));
+        #[cfg(target_os = "linux")]
+        {
+            let _ = app;
+            managed(&device)?.detach()?;
+            if models {
+                crate::linux_runtimes::write_preference("whisperx-speakers", "hidden")?;
             }
-            for dir in [
-                "models",
-                "alignment",
-                "hf",
-                "torch",
-                "nltk",
-                "speaker-models",
-            ] {
-                let path = root.join(dir);
-                if path.exists() {
-                    fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let root = root(&app)?;
+            let env = environment(&root, &device);
+            if env.exists() {
+                fs::remove_dir_all(env).map_err(|e| e.to_string())?;
+            }
+            if models {
+                for mode in ["cpu", "cuda"] {
+                    let _ = fs::remove_file(speaker_marker(&root, mode));
+                }
+                for dir in [
+                    "models",
+                    "alignment",
+                    "hf",
+                    "torch",
+                    "nltk",
+                    "speaker-models",
+                ] {
+                    let path = root.join(dir);
+                    if path.exists() {
+                        fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+                    }
                 }
             }
+            Ok(())
         }
-        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -643,7 +735,7 @@ pub(crate) async fn run_transcription(
             return Err("Source media is unavailable.".into());
         }
         let root = root(&app)?;
-        if !environment(&root, &options.device).join("ready").is_file() {
+        if !active_environment(&root, &options.device)?.join("ready").is_file() {
             return Err("Set up transcription first.".into());
         }
         let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -729,8 +821,15 @@ fn speaker_marker(root: &Path, device: &str) -> PathBuf {
     root.join(format!("speakers-ready-{device}"))
 }
 fn speakers_ready(root: &Path, device: &str) -> bool {
-    environment(root, device).join("ready").is_file()
-        && root.join("speaker-models").is_dir()
+    active_environment(root, device).is_ok_and(|path| path.join("ready").is_file())
+        && speaker_assets_ready(root, device)
+}
+fn speaker_assets_ready(root: &Path, device: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    if crate::linux_runtimes::preference("whisperx-speakers").as_deref() == Some("hidden") {
+        return false;
+    }
+    root.join("speaker-models").is_dir()
         && fs::read_to_string(speaker_marker(root, device))
             .map(|text| text == SPEAKER_MODEL)
             .unwrap_or(false)
@@ -762,7 +861,7 @@ pub(crate) async fn setup_speaker_detection(
         CANCEL.store(false, Ordering::SeqCst);
         device_valid(&device)?;
         let root = root(&app)?;
-        if !environment(&root, &device).join("ready").is_file() {
+        if !active_environment(&root, &device)?.join("ready").is_file() {
             return Err("Set up the selected WhisperX runtime first.".into());
         }
         let (token, _) = crate::transcription_credentials::read()?;
@@ -782,6 +881,8 @@ pub(crate) async fn setup_speaker_detection(
             return Err("Speaker setup cancelled.".into());
         }
         atomic_write(&marker, SPEAKER_MODEL.as_bytes())?;
+        #[cfg(target_os = "linux")]
+        crate::linux_runtimes::write_preference("whisperx-speakers", "available")?;
         report(&app, "Speaker detection ready");
         Ok(())
     })
@@ -794,15 +895,23 @@ pub(crate) async fn remove_speaker_detection(app: tauri::AppHandle) -> Result<()
         let _guard = LOCK
             .try_lock()
             .map_err(|_| "Wait for the transcription operation to finish.")?;
-        let root = root(&app)?;
-        for device in ["cpu", "cuda"] {
-            let _ = fs::remove_file(speaker_marker(&root, device));
+        #[cfg(target_os = "linux")]
+        {
+            let _ = app;
+            return crate::linux_runtimes::write_preference("whisperx-speakers", "hidden");
         }
-        let models = root.join("speaker-models");
-        if models.exists() {
-            fs::remove_dir_all(models).map_err(|e| e.to_string())?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            let root = root(&app)?;
+            for device in ["cpu", "cuda"] {
+                let _ = fs::remove_file(speaker_marker(&root, device));
+            }
+            let models = root.join("speaker-models");
+            if models.exists() {
+                fs::remove_dir_all(models).map_err(|e| e.to_string())?;
+            }
+            Ok(())
         }
-        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?

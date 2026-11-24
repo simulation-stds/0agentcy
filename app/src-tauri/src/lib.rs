@@ -7,6 +7,8 @@ mod caption_export;
 mod audio_models;
 mod transcription;
 mod transcription_credentials;
+#[cfg(target_os = "linux")]
+mod linux_runtimes;
 mod shared_runtime;
 mod vosr;
 #[cfg(target_os = "linux")]
@@ -1587,6 +1589,8 @@ fn list_realesrgan_models() -> Result<Vec<RealEsrganModel>, String> {
             let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
                 continue;
             };
+            #[cfg(target_os = "linux")]
+            if !realesrgan::model_attached(name) { continue; }
             if !realesrgan::model_ready(&realesrgan::root()?, name) { continue; }
             let bin_path = path.with_extension("bin");
             let size_bytes = file_size(&path) + file_size(&bin_path);
@@ -2881,6 +2885,9 @@ fn detect_wan22() -> Wan22Status {
 
 #[tauri::command]
 async fn install_or_update_flux2(app: tauri::AppHandle) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("FLUX.2 setup is deferred on Linux.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || install_or_update_flux2_blocking(app))
         .await
         .map_err(|err| format!("Flux.2 install task failed: {err}"))?
@@ -2994,6 +3001,9 @@ fn install_or_update_flux2_blocking(app: tauri::AppHandle) -> Result<JobResult, 
 
 #[tauri::command]
 async fn install_or_update_wan21(app: tauri::AppHandle) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("Wan 2.1 setup is deferred on Linux.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || install_or_update_wan21_blocking(app))
         .await
         .map_err(|err| format!("Wan2.1 install task failed: {err}"))?
@@ -3008,6 +3018,9 @@ async fn delete_wan21(app: tauri::AppHandle) -> Result<JobResult, String> {
 
 #[tauri::command]
 async fn install_or_update_wan22(app: tauri::AppHandle) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("Wan 2.2 setup is deferred on Linux.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || install_or_update_wan22_blocking(app))
         .await
         .map_err(|err| format!("Wan2.2 install task failed: {err}"))?
@@ -3773,6 +3786,9 @@ async fn install_or_update_facefusion(
     app: tauri::AppHandle,
     onnxruntime: String,
 ) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("FaceFusion setup is deferred on Linux.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         install_or_update_facefusion_blocking(app, onnxruntime)
     })
@@ -3879,6 +3895,9 @@ async fn update_rife(
     app: tauri::AppHandle,
     selected_models: Option<Vec<String>>,
 ) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("Use a native RIFE binary on PATH or in the Xtudio runtime store bin folder.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || update_rife_blocking(app, selected_models))
         .await
         .map_err(|err| format!("RIFE update task failed: {err}"))?
@@ -4014,6 +4033,9 @@ fn update_ffmpeg_blocking(app: tauri::AppHandle) -> Result<JobResult, String> {
 
 #[tauri::command]
 async fn update_miniforge(app: tauri::AppHandle) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("Install a native Conda distribution outside Xtudio if another application needs it.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || update_miniforge_blocking(app))
         .await
         .map_err(|err| format!("Miniforge update task failed: {err}"))?
@@ -4116,6 +4138,9 @@ fn update_miniforge_blocking(app: tauri::AppHandle) -> Result<JobResult, String>
 
 #[tauri::command]
 async fn update_image_codec_tool(app: tauri::AppHandle, tool: String) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("Install the native codec command with your system package manager.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || update_image_codec_tool_blocking(app, &tool))
         .await
         .map_err(|err| format!("Image codec tool update task failed: {err}"))?
@@ -4130,6 +4155,9 @@ async fn delete_image_codec_tool(tool: String) -> Result<JobResult, String> {
 
 #[tauri::command]
 async fn update_imagemagick(app: tauri::AppHandle) -> Result<JobResult, String> {
+    if cfg!(target_os = "linux") {
+        return Err("Install the native ImageMagick command with your system package manager.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         update_image_codec_tool_blocking(app, "imagemagick")
     })
@@ -6167,6 +6195,11 @@ fn download_with_progress(
     url: &str,
     destination: &Path,
 ) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    if linux_runtimes::offline_import() {
+        return Err(format!("Offline import needs a verified local copy of {}.", destination.display()));
+    }
+
     let mut response = ureq::get(url)
         .header("User-Agent", "videomaxxxing-local-tool")
         .call()
@@ -7799,7 +7832,7 @@ struct SupirPreset {
 }
 
 #[cfg(target_os = "linux")]
-fn supir_tool_dir() -> PathBuf { supir::root() }
+fn supir_tool_dir() -> PathBuf { supir::root().unwrap_or_else(|_| workspace_root().join("tools/supir")) }
 
 #[cfg(not(target_os = "linux"))]
 fn supir_tool_dir() -> PathBuf {
@@ -8532,6 +8565,23 @@ fn find_tool(name: &str) -> Option<String> {
     if name == "realesrgan-ncnn-vulkan" {
         return realesrgan::executable().map(|p|p.to_string_lossy().into());
     }
+    #[cfg(target_os = "linux")]
+    {
+        use std::{io::Read, os::unix::fs::PermissionsExt};
+        let shared = if matches!(name, "ffmpeg" | "ffprobe") {
+            None
+        } else {
+            linux_runtimes::store().ok().map(|root| root.join("bin").join(name))
+        };
+        return path_tool_candidates(name).into_iter().chain(shared).find(|path| {
+            path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                && fs::File::open(path).is_ok_and(|mut file| {
+                    let mut signature = [0; 2];
+                    file.read_exact(&mut signature).is_ok() && signature != *b"MZ"
+                })
+        }).map(|path| path.to_string_lossy().into_owned());
+    }
+    #[cfg(not(target_os = "linux"))]
     if !cfg!(windows) && matches!(name, "ffmpeg" | "ffprobe") {
         return path_tool_candidates(name)
             .into_iter()
@@ -8539,6 +8589,7 @@ fn find_tool(name: &str) -> Option<String> {
             .map(|path| path.to_string_lossy().to_string());
     }
 
+    #[cfg(not(target_os = "linux"))]
     local_tool_candidates(name)
         .into_iter()
         .chain(path_tool_candidates(name))
@@ -8624,6 +8675,7 @@ fn find_file_recursive_limited(root: &Path, file_name: &str, max_depth: usize) -
     None
 }
 
+#[cfg(not(target_os = "linux"))]
 fn local_tool_candidates(name: &str) -> Vec<PathBuf> {
     let root = workspace_root();
     match name {
@@ -8661,6 +8713,7 @@ fn local_tool_candidates(name: &str) -> Vec<PathBuf> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn realesrgan_models_dir() -> Result<PathBuf, String> {
     let executable = find_tool("realesrgan-ncnn-vulkan").ok_or("Real-ESRGAN was not found.")?;
     Ok(PathBuf::from(executable)
@@ -8675,6 +8728,12 @@ fn rife_model_dirs() -> Result<Vec<PathBuf>, String> {
     Ok(vec![tool_dir.join("models"), tool_dir])
 }
 
+#[cfg(target_os = "linux")]
+fn delete_realesrgan_model(model: &str) -> Result<(), String> {
+    realesrgan::detach_model(model)
+}
+
+#[cfg(not(target_os = "linux"))]
 fn delete_realesrgan_model(model: &str) -> Result<(), String> {
     let _guard = realesrgan::lock()?;
     if !realesrgan::valid_name(model) { return Err("Invalid Real-ESRGAN model name".into()); }
@@ -9401,6 +9460,20 @@ pub fn run() {
     builder
         .setup(|app| {
             realesrgan::init(app.handle()).map_err(std::io::Error::other)?;
+            #[cfg(target_os = "linux")]
+            if let Some(source) = linux_runtimes::migration_source() {
+                let handle = app.handle().clone();
+                if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                    let _ = window.hide();
+                }
+                tauri::async_runtime::spawn(async move {
+                    let result = linux_runtimes::migrate(handle.clone(), source).await;
+                    if let Err(error) = &result {
+                        eprintln!("{error}");
+                    }
+                    handle.exit(if result.is_ok() { 0 } else { 1 });
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -255,6 +255,8 @@ def main():
         try:
             nltk.data.find("tokenizers/punkt_tab")
         except LookupError:
+            if os.environ.get("XTUDIO_OFFLINE_IMPORT") == "1":
+                raise RuntimeError("Offline import is missing NLTK punkt_tab data.")
             progress("Downloading text segmentation data")
             nltk.download("punkt_tab", download_dir=os.environ["NLTK_DATA"], raise_on_error=True, quiet=True)
         progress("Loading transcription model (downloads missing model files)")

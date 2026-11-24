@@ -27,10 +27,12 @@ if (mode === "staging") {
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
   }
-  const modelRoot = join(root, "tools", "staging-models");
-  mkdirSync(modelRoot, { recursive: true });
   env.VIDEOMAXXING_STAGING_PROFILE = profile;
-  env.VIDEOMAXXING_SHARED_MODELS = modelRoot;
+  if (process.platform !== "linux") {
+    const modelRoot = join(root, "tools", "staging-models");
+    mkdirSync(modelRoot, { recursive: true });
+    env.VIDEOMAXXING_SHARED_MODELS = modelRoot;
+  }
   config.identifier = "com.w2ds.videomaxxxing.staging";
   config.productName = "Simulation Studio Staging";
   config.app = { windows: [{
